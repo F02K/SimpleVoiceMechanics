@@ -258,6 +258,61 @@ boolean isNight = TimeModifier.isNight(world);
 boolean isSocial = MobGroupAlert.isSocialMob(EntityType.ZOMBIE);
 ```
 
+## Developer API
+
+Other plugins can integrate through the Bukkit service API:
+
+```java
+import de.tecca.simplevoicemechanics.api.HookPriority;
+import de.tecca.simplevoicemechanics.api.MobReactionType;
+import de.tecca.simplevoicemechanics.api.SimpleVoiceMechanicsApi;
+import org.bukkit.Location;
+import org.bukkit.plugin.RegisteredServiceProvider;
+import org.bukkit.plugin.java.JavaPlugin;
+
+public final class RegionVoiceBridge extends JavaPlugin {
+
+    private SimpleVoiceMechanicsApi voiceApi;
+
+    @Override
+    public void onEnable() {
+        RegisteredServiceProvider<SimpleVoiceMechanicsApi> provider =
+                getServer().getServicesManager().getRegistration(SimpleVoiceMechanicsApi.class);
+
+        if (provider == null) {
+            getLogger().warning("SimpleVoiceMechanics API is not available");
+            return;
+        }
+
+        voiceApi = provider.getProvider();
+        voiceApi.registerMobReactionHook(this, HookPriority.NORMAL, context -> {
+            if (context.getReactionType() == MobReactionType.HOSTILE_TARGET
+                    && isInProtectedRegion(context.getPlayer().getLocation())) {
+                context.setCancelled(true);
+            }
+        });
+    }
+
+    @Override
+    public void onDisable() {
+        if (voiceApi != null) {
+            voiceApi.unregisterHooks(this);
+        }
+    }
+
+    private boolean isInProtectedRegion(Location location) {
+        return false;
+    }
+}
+```
+
+Available service hooks:
+- `registerDetectionHook` can cancel voice mechanics or adjust effective dB before normal processing.
+- `registerMobReactionHook` can cancel specific mob reactions such as hostile targeting, invisible-player investigation, group alerts, fleeing, following, or Warden anger.
+- `registerSculkActivationHook` can cancel individual sculk sensor activations.
+
+Players with `voicelistener.bypass` do not trigger mob or sculk voice mechanics.
+
 ## Building
 
 ```bash

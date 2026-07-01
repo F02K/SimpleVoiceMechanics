@@ -1,9 +1,14 @@
 package de.tecca.simplevoicemechanics.listener;
 
 import de.tecca.simplevoicemechanics.SimpleVoiceMechanics;
+import de.tecca.simplevoicemechanics.api.VoiceSculkActivationContext;
 import de.tecca.simplevoicemechanics.event.VoiceDetectedEvent;
 import de.tecca.simplevoicemechanics.manager.ConfigManager;
+import de.tecca.simplevoicemechanics.service.DetectionResult;
+import de.tecca.simplevoicemechanics.service.DetectionService;
+import de.tecca.simplevoicemechanics.service.SculkVibrationMath;
 import de.tecca.simplevoicemechanics.util.RangeCalculator;
+import de.tecca.simplevoicemechanics.util.RandomProvider;
 import org.bukkit.*;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Player;
@@ -41,6 +46,8 @@ public class SculkListener implements Listener {
             plugin.getLogger().warning("GameEvent API not available - Sculk Sensor detection disabled");
             plugin.getLogger().warning("Sculk Sensors require Minecraft 1.19+");
         }
+
+        startCooldownCleanupTask();
     }
 
     /**
@@ -60,11 +67,16 @@ public class SculkListener implements Listener {
      */
     @EventHandler
     public void onVoiceDetected(VoiceDetectedEvent event) {
+        if (event.isCancelled()) {
+            return;
+        }
+
         if (!gameEventSupported) {
             return;
         }
 
         if (!plugin.getConfigManager().isSculkEnabled()) {
+            logSculkEvent("ignored voice event because sculk hearing is disabled");
             return;
         }
 
@@ -72,24 +84,21 @@ public class SculkListener implements Listener {
 
         // Only detect Survival/Adventure players
         if (!isValidGameMode(player)) {
+            logSculkEvent("ignored voice event from " + player.getName() + " in " + player.getGameMode());
             return;
         }
 
         double decibels = event.getDecibels();
 
-        // Check Sculk threshold BEFORE processing sensors
-        // This prevents Step event from firing if too quiet
-        if (decibels < plugin.getConfigManager().getSculkVolumeThresholdDb()) {
-            return;
-        }
-
         Location loc = event.getLocation();
+        logSculkEvent(String.format(
+                "processing voice event from %s at %.1f dB",
+                player.getName(),
+                decibels
+        ));
 
         // Search for and activate nearby Sculk Sensors
         processSculkSensors(player, loc, decibels);
-
-        // Clean up old cooldown entries
-        cleanupOldTriggers();
     }
 
     /**
@@ -106,25 +115,59 @@ public class SculkListener implements Listener {
     private void processSculkSensors(Player player, Location loc, double decibels) {
         ConfigManager config = plugin.getConfigManager();
         double maxRange = config.getSculkMaxRange();
-        double volumeThresholdDb = config.getVolumeThresholdDb();
+        double volumeThresholdDb = config.getSculkVolumeThresholdDb();
 
         // Calculate effective range based on volume
         double effectiveMaxRange = RangeCalculator.calculateEffectiveRange(maxRange, decibels, volumeThresholdDb);
+        effectiveMaxRange = Math.min(effectiveMaxRange, config.getSculkMaxScanRadius());
 
         int searchRadius = (int) Math.ceil(effectiveMaxRange);
         Location playerLoc = player.getLocation();
+        World world = playerLoc.getWorld();
+        if (world == null) {
+            logSculkEvent("ignored voice event because player world is unavailable");
+            return;
+        }
+
+        if (searchRadius <= 0) {
+            logSculkEvent(String.format(
+                    "scan skipped because effective sculk radius is %.2f blocks at %.1f dB",
+                    effectiveMaxRange,
+                    decibels
+            ));
+            return;
+        }
+
+        logSculkEvent(String.format(
+                "scanning for sculk sensors within %d blocks at %.1f dB (threshold %.1f dB)",
+                searchRadius,
+                decibels,
+                volumeThresholdDb
+        ));
+
+        int baseX = playerLoc.getBlockX();
+        int baseY = playerLoc.getBlockY();
+        int baseZ = playerLoc.getBlockZ();
+        int minYOffset = Math.max(-searchRadius, world.getMinHeight() - baseY);
+        int maxYOffset = Math.min(searchRadius, world.getMaxHeight() - 1 - baseY);
+        int sensorsFound = 0;
 
         // Iterate through all blocks in range
         for (int x = -searchRadius; x <= searchRadius; x++) {
-            for (int y = -searchRadius; y <= searchRadius; y++) {
+            for (int y = minYOffset; y <= maxYOffset; y++) {
                 for (int z = -searchRadius; z <= searchRadius; z++) {
-                    Block block = playerLoc.clone().add(x, y, z).getBlock();
+                    Block block = world.getBlockAt(baseX + x, baseY + y, baseZ + z);
 
                     if (isSculkSensor(block)) {
+                        sensorsFound++;
                         processSculkSensor(block, player, loc, decibels);
                     }
                 }
             }
+        }
+
+        if (sensorsFound == 0) {
+            logSculkEvent(String.format("no sculk sensors found within %d blocks", searchRadius));
         }
     }
 
@@ -144,48 +187,78 @@ public class SculkListener implements Listener {
     private void processSculkSensor(Block block, Player player, Location voiceLoc, double decibels) {
         ConfigManager config = plugin.getConfigManager();
         Location sensorLoc = block.getLocation();
+        if (sensorLoc.getWorld() == null || voiceLoc.getWorld() == null ||
+                !sensorLoc.getWorld().equals(voiceLoc.getWorld())) {
+            return;
+        }
 
         double distance = sensorLoc.distance(voiceLoc);
         double maxRange = config.getSculkMaxRange();
         double minRange = config.getSculkMinRange();
         double falloffCurve = config.getSculkFalloffCurve();
-        double volumeThresholdDb = config.getVolumeThresholdDb();
-
-        // Calculate effective range based on volume
-        double effectiveMaxRange = RangeCalculator.calculateEffectiveRange(maxRange, decibels, volumeThresholdDb);
-
-        // Check if sensor is within effective range
-        if (distance > effectiveMaxRange) {
-            return;
-        }
-
-        // Check cooldown
-        if (isOnCooldown(sensorLoc)) {
-            return;
-        }
-
-        // Calculate activation probability with dynamic range
-        double activationChance = RangeCalculator.calculateDynamicDetectionChance(
+        double volumeThresholdDb = config.getSculkVolumeThresholdDb();
+        DetectionResult detection = DetectionService.calculate(
                 distance, minRange, maxRange, falloffCurve, decibels, volumeThresholdDb
         );
 
-        // Probabilistic activation
-        if (Math.random() > activationChance) {
+        if (!detection.isThresholdPassed()) {
+            logSculkRejection(block, detection, "below threshold");
             return;
         }
 
+        if (!detection.isWithinRange()) {
+            logSculkRejection(block, detection, "out of range");
+            return;
+        }
+
+        if (isOnCooldown(sensorLoc)) {
+            logSculkRejection(block, detection, "cooldown");
+            return;
+        }
+
+        if (!RandomProvider.passes(detection.getChance())) {
+            logSculkRejection(block, detection, "chance miss");
+            return;
+        }
+
+        VoiceSculkActivationContext context = new VoiceSculkActivationContext(
+                player, block, distance, detection.getChance(), decibels
+        );
+        plugin.getApi().callSculkActivationHooks(context);
+        if (context.isCancelled()) {
+            logSculkRejection(block, detection, "hook cancellation");
+            return;
+        }
+
+        if (context.getEffectiveDecibels() != decibels) {
+            DetectionResult adjustedDetection = DetectionService.calculate(
+                    distance, minRange, maxRange, falloffCurve,
+                    context.getEffectiveDecibels(), volumeThresholdDb
+            );
+            if (!adjustedDetection.isThresholdPassed()) {
+                logSculkRejection(block, adjustedDetection, "adjusted below threshold");
+                return;
+            }
+            if (!adjustedDetection.isWithinRange()) {
+                logSculkRejection(block, adjustedDetection, "adjusted out of range");
+                return;
+            }
+            detection = adjustedDetection;
+        }
+
         // Trigger the Sculk Sensor
-        triggerSculkSensor(block, player);
+        triggerSculkSensor(block, player, voiceLoc, detection.getDistance());
 
         // Record trigger time
         lastTriggerTime.put(sensorLoc, System.currentTimeMillis());
 
         // Debug logging
-        if (plugin.getConfig().getBoolean("debug.sculk-logging", false)) {
+        if (config.isSculkLoggingEnabled()) {
             plugin.getLogger().info(String.format(
-                    "Sculk %s activated | %s",
+                    "Sculk %s activated by voice event%s | %s",
                     block.getType(),
-                    RangeCalculator.getDynamicDebugInfo(distance, minRange, maxRange, falloffCurve, decibels, volumeThresholdDb)
+                    config.isSculkVibrationParticleEnabled() ? " with vibration particle" : "",
+                    detection.getDebugInfo()
             ));
         }
     }
@@ -208,13 +281,64 @@ public class SculkListener implements Listener {
      * Triggers a Sculk Sensor using Paper's GameEvent API.
      * Only called when gameEventSupported is true.
      */
-    private void triggerSculkSensor(Block block, Player player) {
-        // Send STEP game event at block center to trigger Sculk Sensor
-        block.getWorld().sendGameEvent(
-                player,
-                org.bukkit.GameEvent.STEP,
-                block.getLocation().add(0.5, 0.5, 0.5).toVector()
+    private void triggerSculkSensor(Block block, Player player, Location voiceLoc, double distance) {
+        World world = voiceLoc.getWorld();
+        if (world == null) {
+            return;
+        }
+
+        // Send the vibration-worthy event from the speaker position so vanilla sculk can hear it.
+        world.sendGameEvent(player, GameEvent.STEP, voiceLoc.toVector());
+        spawnVibrationParticle(world, voiceLoc, block, distance);
+    }
+
+    /**
+     * Spawns the visible vibration travelling from the speaker to the sensor.
+     */
+    private void spawnVibrationParticle(World world, Location origin, Block sensorBlock, double distance) {
+        ConfigManager config = plugin.getConfigManager();
+        if (!config.isSculkVibrationParticleEnabled()) {
+            return;
+        }
+
+        int arrivalTicks = SculkVibrationMath.calculateArrivalTicks(
+                distance,
+                config.getSculkVibrationMinArrivalTicks(),
+                config.getSculkVibrationMaxArrivalTicks()
         );
+        Vibration vibration = new Vibration(
+                origin,
+                new Vibration.Destination.BlockDestination(sensorBlock),
+                arrivalTicks
+        );
+        world.spawnParticle(Particle.VIBRATION, origin, 1, vibration);
+    }
+
+    /**
+     * Logs why a sculk sensor did not activate when sculk debug logging is enabled.
+     */
+    private void logSculkRejection(Block block, DetectionResult detection, String reason) {
+        if (!plugin.getConfigManager().isSculkLoggingEnabled()) {
+            return;
+        }
+
+        plugin.getLogger().info(String.format(
+                "Sculk %s ignored voice (%s) | %s",
+                block.getType(),
+                reason,
+                detection.getDebugInfo()
+        ));
+    }
+
+    /**
+     * Logs sculk-level debug messages that are not tied to one sensor block.
+     */
+    private void logSculkEvent(String message) {
+        if (!plugin.getConfigManager().isSculkLoggingEnabled()) {
+            return;
+        }
+
+        plugin.getLogger().info("[Sculk Debug] " + message);
     }
 
     /**
@@ -227,5 +351,12 @@ public class SculkListener implements Listener {
         lastTriggerTime.entrySet().removeIf(entry ->
                 (currentTime - entry.getValue()) > maxAge
         );
+    }
+
+    /**
+     * Periodically cleans up old sculk cooldown entries.
+     */
+    private void startCooldownCleanupTask() {
+        Bukkit.getScheduler().runTaskTimer(plugin, this::cleanupOldTriggers, 200L, 200L);
     }
 }

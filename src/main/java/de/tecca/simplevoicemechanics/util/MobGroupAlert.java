@@ -110,17 +110,33 @@ public class MobGroupAlert {
      * @return number of mobs alerted
      */
     public static int alertNearbyMobs(Mob alertingMob, Player target, int maxAlerts) {
+        return alertNearbyMobs(alertingMob, target, maxAlerts, getAlertRange(alertingMob.getType()));
+    }
+
+    /**
+     * Alerts nearby mobs of the same type to target a player.
+     *
+     * @param alertingMob the mob that detected the player
+     * @param target the player to target
+     * @param maxAlerts maximum number of mobs to alert
+     * @param alertRange configured alert range in blocks
+     * @return number of mobs alerted
+     */
+    public static int alertNearbyMobs(Mob alertingMob, Player target, int maxAlerts, double alertRange) {
         EntityType mobType = alertingMob.getType();
 
         if (!isSocialMob(mobType)) {
             return 0;
         }
 
-        double alertRange = getAlertRange(mobType);
+        double safeAlertRange = Math.max(0.0, alertRange);
         Location mobLoc = alertingMob.getLocation();
+        if (mobLoc.getWorld() == null) {
+            return 0;
+        }
 
         Collection<Entity> nearbyEntities = mobLoc.getWorld()
-                .getNearbyEntities(mobLoc, alertRange, alertRange, alertRange);
+                .getNearbyEntities(mobLoc, safeAlertRange, safeAlertRange, safeAlertRange);
 
         int alertedCount = 0;
 

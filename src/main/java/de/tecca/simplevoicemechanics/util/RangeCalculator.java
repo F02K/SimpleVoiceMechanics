@@ -41,6 +41,8 @@ public class RangeCalculator {
      */
     public static double calculateEffectiveRange(double configuredRange, double decibels,
                                                  double volumeThresholdDb) {
+        double safeRange = Math.max(0.0, configuredRange);
+
         // Normalize dB relative to threshold
         // At threshold: multiplier = 1.0
         // Above threshold: multiplier increases
@@ -58,7 +60,7 @@ public class RangeCalculator {
         // Cap maximum multiplier at 2.5x
         multiplier = Math.min(multiplier, 2.5);
 
-        return configuredRange * multiplier;
+        return safeRange * multiplier;
     }
 
     /**
@@ -87,22 +89,26 @@ public class RangeCalculator {
      */
     public static double calculateDetectionChance(double distance, double minRange,
                                                   double maxRange, double falloffCurve) {
+        double safeMinRange = Math.max(0.0, minRange);
+        double safeMaxRange = Math.max(safeMinRange, maxRange);
+        double safeFalloffCurve = Math.max(0.0, falloffCurve);
+
         // Within min range: always detect
-        if (distance <= minRange) {
+        if (distance <= safeMinRange) {
             return 1.0;
         }
 
         // Beyond max range: never detect
-        if (distance >= maxRange) {
+        if (distance >= safeMaxRange) {
             return 0.0;
         }
 
         // Calculate normalized distance (0.0 at min-range, 1.0 at max-range)
-        double normalizedDistance = (distance - minRange) / (maxRange - minRange);
+        double normalizedDistance = (distance - safeMinRange) / (safeMaxRange - safeMinRange);
 
         // Apply falloff curve (inverted so 1.0 = 100% at min-range, 0.0 = 0% at max-range)
         // Higher falloff curve = detection chance stays high longer
-        double chance = Math.pow(1.0 - normalizedDistance, falloffCurve);
+        double chance = Math.pow(1.0 - normalizedDistance, safeFalloffCurve);
 
         return Math.max(0.0, Math.min(1.0, chance));
     }

@@ -6,12 +6,14 @@ import de.maxhenkel.voicechat.api.events.EventRegistration;
 import de.maxhenkel.voicechat.api.events.MicrophonePacketEvent;
 import de.maxhenkel.voicechat.api.opus.OpusDecoder;
 import de.tecca.simplevoicemechanics.SimpleVoiceMechanics;
+import de.tecca.simplevoicemechanics.api.VoiceDetectionContext;
 import de.tecca.simplevoicemechanics.event.VoiceDetectedEvent;
-import de.tecca.simplevoicemechanics.manager.ConfigManager;
 import de.tecca.simplevoicemechanics.util.AudioUtils;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
+
+import java.util.UUID;
 
 /**
  * Handles SimpleVoiceChat API integration and voice packet processing.
@@ -34,7 +36,7 @@ public class VoiceHandler implements VoicechatPlugin {
 
     private final SimpleVoiceMechanics plugin;
     private VoicechatApi voicechatApi;
-    private OpusDecoder decoder;
+    private final ThreadLocal<OpusDecoder> decoder = new ThreadLocal<>();
 
     public VoiceHandler(SimpleVoiceMechanics plugin) {
         this.plugin = plugin;
@@ -65,11 +67,7 @@ public class VoiceHandler implements VoicechatPlugin {
      * @param event the microphone packet event
      */
     private void onMicrophonePacket(MicrophonePacketEvent event) {
-        // Get player from connection
-        Player player = Bukkit.getPlayer(event.getSenderConnection().getPlayer().getUuid());
-        if (player == null || !player.isOnline()) {
-            return;
-        }
+        UUID playerId = event.getSenderConnection().getPlayer().getUuid();
 
         // Get audio data
         byte[] opusData = event.getPacket().getOpusEncodedData();
@@ -77,32 +75,50 @@ public class VoiceHandler implements VoicechatPlugin {
             return; // Empty packet (player stopped talking)
         }
 
-        // Initialize decoder if needed
-        if (decoder == null) {
-            decoder = event.getVoicechat().createDecoder();
+        // Initialize a decoder per callback thread to avoid sharing decoder state.
+        OpusDecoder opusDecoder = decoder.get();
+        if (opusDecoder == null) {
+            opusDecoder = event.getVoicechat().createDecoder();
+            decoder.set(opusDecoder);
         }
 
         // Decode Opus to PCM samples
-        decoder.resetState();
-        short[] samples = decoder.decode(opusData);
+        opusDecoder.resetState();
+        short[] samples = opusDecoder.decode(opusData);
 
         // Calculate audio level in decibels
         double db = AudioUtils.calculateAudioLevel(samples);
 
-        // Debug logging
-        if (plugin.getConfig().getBoolean("debug.audio-logging", false)) {
-            plugin.getLogger().info(AudioUtils.getDebugInfo(samples));
-        }
-
-        // Fire VoiceDetectedEvent on main thread
-        // Listeners will check their own thresholds
-        Location playerLoc = player.getLocation();
+        // Resolve Bukkit state, run API hooks, and fire events on the main thread.
         Bukkit.getScheduler().runTask(plugin, () -> {
-            VoiceDetectedEvent voiceEvent = new VoiceDetectedEvent(
-                    player,
-                    playerLoc,
-                    db
-            );
+            Player player = Bukkit.getPlayer(playerId);
+            if (player == null || !player.isOnline()) {
+                return;
+            }
+
+            if (player.hasPermission("voicelistener.bypass")) {
+                return;
+            }
+
+            Location playerLoc = player.getLocation();
+            VoiceDetectionContext context = new VoiceDetectionContext(player, playerLoc, db, db);
+            plugin.getApi().callDetectionHooks(context);
+
+            if (context.isCancelled()) {
+                return;
+            }
+
+            // Debug logging
+            if (plugin.getConfigManager().isAudioLoggingEnabled()) {
+                plugin.getLogger().info(String.format(
+                        "[Voice Debug] %s speaking at %.1f dB | %s",
+                        player.getName(),
+                        context.getEffectiveDecibels(),
+                        AudioUtils.getDebugInfo(samples)
+                ));
+            }
+
+            VoiceDetectedEvent voiceEvent = new VoiceDetectedEvent(player, playerLoc, context.getEffectiveDecibels());
             Bukkit.getPluginManager().callEvent(voiceEvent);
         });
     }

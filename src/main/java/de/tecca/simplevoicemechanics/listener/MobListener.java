@@ -1,8 +1,13 @@
 package de.tecca.simplevoicemechanics.listener;
 
 import de.tecca.simplevoicemechanics.SimpleVoiceMechanics;
+import de.tecca.simplevoicemechanics.api.MobReactionType;
+import de.tecca.simplevoicemechanics.api.VoiceMobReactionContext;
 import de.tecca.simplevoicemechanics.event.VoiceDetectedEvent;
 import de.tecca.simplevoicemechanics.manager.ConfigManager;
+import de.tecca.simplevoicemechanics.service.DetectionResult;
+import de.tecca.simplevoicemechanics.service.DetectionService;
+import de.tecca.simplevoicemechanics.service.InvestigationMath;
 import de.tecca.simplevoicemechanics.util.*;
 import org.bukkit.*;
 import org.bukkit.block.Biome;
@@ -10,6 +15,7 @@ import org.bukkit.entity.*;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.metadata.FixedMetadataValue;
+import org.bukkit.potion.PotionEffectType;
 
 import java.util.Collection;
 import java.util.HashMap;
@@ -44,6 +50,7 @@ public class MobListener implements Listener {
     private static final String EYE_CONTACT_META_KEY = "svm_eye_contact";
     private static final String EYE_CONTACT_TIME_KEY = "svm_eye_contact_time";
     private static final String FLEE_META_KEY = "svm_fleeing";
+    private static final double INVESTIGATION_ARRIVAL_DISTANCE = 2.5;
 
     private final SimpleVoiceMechanics plugin;
 
@@ -54,8 +61,8 @@ public class MobListener implements Listener {
     // Reaction cooldowns to prevent rapid re-triggering
     private final Map<UUID, Long> reactionCooldowns = new HashMap<>();
 
-    // Look-at tracking for duration
-    private final Map<UUID, Long> lookAtStartTime = new HashMap<>();
+    // Hostile mobs investigating invisible players by last heard location
+    private final Map<UUID, HostileInvestigation> hostileInvestigations = new HashMap<>();
 
     public MobListener(SimpleVoiceMechanics plugin) {
         this.plugin = plugin;
@@ -67,6 +74,10 @@ public class MobListener implements Listener {
      */
     @EventHandler
     public void onVoiceDetected(VoiceDetectedEvent event) {
+        if (event.isCancelled()) {
+            return;
+        }
+
         if (!plugin.getConfigManager().isMobHearingEnabled()) {
             return;
         }
@@ -119,7 +130,7 @@ public class MobListener implements Listener {
         double modified = decibels - adjustment;
 
         // Debug logging
-        if (plugin.getConfig().getBoolean("debug.environmental-logging", false)) {
+        if (plugin.getConfigManager().isEnvironmentalLoggingEnabled()) {
             plugin.getLogger().info(String.format(
                     "Environmental modifiers | Original: %.1f dB | Adjustment: %+.1f dB | Modified: %.1f dB",
                     decibels, adjustment, modified
@@ -182,17 +193,13 @@ public class MobListener implements Listener {
      * Makes mob look at location with scheduled stop after duration.
      */
     private void makeMobLookAtWithDuration(Mob mob, Location target, int durationTicks) {
-        UUID mobId = mob.getUniqueId();
-
         // Start looking
         makeMobLookAt(mob, target);
-        lookAtStartTime.put(mobId, System.currentTimeMillis());
 
         // Schedule stop looking after duration
         Bukkit.getScheduler().runTaskLater(plugin, () -> {
             if (mob.isValid()) {
                 mob.getPathfinder().stopPathfinding();
-                lookAtStartTime.remove(mobId);
             }
         }, durationTicks);
     }
@@ -206,24 +213,26 @@ public class MobListener implements Listener {
     }
 
     /**
+     * Checks if the player is currently invisible.
+     */
+    private boolean isInvisible(Player player) {
+        return player.hasPotionEffect(PotionEffectType.INVISIBILITY);
+    }
+
+    /**
      * Processes all mobs near the voice location.
      */
     private void processNearbyMobs(Player player, Location loc, boolean isSneaking, double decibels) {
         ConfigManager config = plugin.getConfigManager();
 
-        // Use max possible range to check all entities
-        double maxCheckRange = Math.max(
-                Math.max(config.getHostileMaxRange(), config.getNeutralMaxRange()),
-                Math.max(config.getPeacefulMaxRange(), config.getWardenMaxRange())
-        );
+        double maxCheckRange = calculateMaxMobCheckRange(player, decibels, config);
 
-        // Apply environmental range multiplier
-        maxCheckRange = applyRangeMultiplier(player, maxCheckRange);
+        World world = loc.getWorld();
+        if (world == null) {
+            return;
+        }
 
-        // Account for volume boost (loud voices = larger search area)
-        maxCheckRange = RangeCalculator.calculateEffectiveRange(maxCheckRange, decibels, config.getVolumeThresholdDb());
-
-        Collection<Entity> nearbyEntities = loc.getWorld()
+        Collection<Entity> nearbyEntities = world
                 .getNearbyEntities(loc, maxCheckRange, maxCheckRange, maxCheckRange);
 
         for (Entity entity : nearbyEntities) {
@@ -258,47 +267,81 @@ public class MobListener implements Listener {
     private void processWarden(Warden warden, Player player, Location playerLoc, double decibels) {
         ConfigManager config = plugin.getConfigManager();
 
-        // Check threshold
-        if (decibels < config.getWardenVolumeThresholdDb()) {
-            return;
-        }
-
         double distance = warden.getLocation().distance(playerLoc);
         double maxRange = applyRangeMultiplier(player, config.getWardenMaxRange());
         double minRange = applyRangeMultiplier(player, config.getWardenMinRange());
         double falloffCurve = config.getWardenFalloffCurve();
         double volumeThresholdDb = config.getWardenVolumeThresholdDb();
-
-        // Calculate effective range based on volume
-        double effectiveMaxRange = RangeCalculator.calculateEffectiveRange(maxRange, decibels, volumeThresholdDb);
-
-        // Check if in effective range
-        if (distance > effectiveMaxRange) {
-            return;
-        }
-
-        // Calculate detection chance with dynamic range
-        double detectionChance = RangeCalculator.calculateDynamicDetectionChance(
+        DetectionResult detection = DetectionService.calculate(
                 distance, minRange, maxRange, falloffCurve, decibels, volumeThresholdDb
         );
 
-        // Probabilistic detection
-        if (Math.random() > detectionChance) {
+        if (!detection.canAttemptDetection() || !RandomProvider.passes(detection.getChance())) {
+            return;
+        }
+
+        VoiceMobReactionContext context = callMobReactionHooks(
+                player, warden, MobReactionType.WARDEN_ANGER, detection, decibels
+        );
+        if (context == null) {
             return;
         }
 
         // Calculate anger based on distance and volume
-        int angerIncrease = RangeCalculator.calculateWardenAnger(distance, minRange, maxRange, decibels, volumeThresholdDb);
+        int angerIncrease = RangeCalculator.calculateWardenAnger(
+                distance, minRange, maxRange, context.getEffectiveDecibels(), volumeThresholdDb
+        );
         warden.increaseAnger(player, angerIncrease);
 
         // Debug logging
-        if (plugin.getConfig().getBoolean("debug.warden-logging", false)) {
+        if (config.isWardenLoggingEnabled()) {
             plugin.getLogger().info(String.format(
                     "Warden anger +%d | %s",
                     angerIncrease,
-                    RangeCalculator.getDynamicDebugInfo(distance, minRange, maxRange, falloffCurve, decibels, volumeThresholdDb)
+                    detection.getDebugInfo()
             ));
         }
+    }
+
+    /**
+     * Calculates the largest entity search radius needed by enabled mob categories.
+     */
+    private double calculateMaxMobCheckRange(Player player, double decibels, ConfigManager config) {
+        double maxCheckRange = 0.0;
+
+        if (config.isHostileMobsEnabled()) {
+            maxCheckRange = Math.max(maxCheckRange, RangeCalculator.calculateEffectiveRange(
+                    applyRangeMultiplier(player, config.getHostileMaxRange()),
+                    decibels,
+                    config.getHostileVolumeThresholdDb()
+            ));
+        }
+
+        if (config.isNeutralMobsEnabled()) {
+            maxCheckRange = Math.max(maxCheckRange, RangeCalculator.calculateEffectiveRange(
+                    applyRangeMultiplier(player, config.getNeutralMaxRange()),
+                    decibels,
+                    config.getNeutralVolumeThresholdDb()
+            ));
+        }
+
+        if (config.isPeacefulMobsEnabled()) {
+            maxCheckRange = Math.max(maxCheckRange, RangeCalculator.calculateEffectiveRange(
+                    applyRangeMultiplier(player, config.getPeacefulMaxRange()),
+                    decibels,
+                    config.getPeacefulVolumeThresholdDb()
+            ));
+        }
+
+        if (config.isWardenEnabled()) {
+            maxCheckRange = Math.max(maxCheckRange, RangeCalculator.calculateEffectiveRange(
+                    applyRangeMultiplier(player, config.getWardenMaxRange()),
+                    decibels,
+                    config.getWardenVolumeThresholdDb()
+            ));
+        }
+
+        return maxCheckRange;
     }
 
     /**
@@ -320,30 +363,28 @@ public class MobListener implements Listener {
             return;
         }
 
-        // Check threshold
-        if (decibels < config.getHostileVolumeThresholdDb()) {
-            return;
-        }
-
         double distance = mob.getLocation().distance(playerLoc);
         double maxRange = applyRangeMultiplier(player, config.getHostileMaxRange());
         double minRange = applyRangeMultiplier(player, config.getHostileMinRange());
         double falloffCurve = config.getHostileFalloffCurve();
         double volumeThresholdDb = config.getHostileVolumeThresholdDb();
-
-        // Calculate effective range based on volume
-        double effectiveMaxRange = RangeCalculator.calculateEffectiveRange(maxRange, decibels, volumeThresholdDb);
-
-        if (distance > effectiveMaxRange) {
-            return;
-        }
-
-        // Calculate detection chance with dynamic range
-        double detectionChance = RangeCalculator.calculateDynamicDetectionChance(
+        DetectionResult detection = DetectionService.calculate(
                 distance, minRange, maxRange, falloffCurve, decibels, volumeThresholdDb
         );
 
-        if (Math.random() > detectionChance) {
+        if (!detection.canAttemptDetection() || !RandomProvider.passes(detection.getChance())) {
+            return;
+        }
+
+        if (isInvisible(player) && config.isInvisiblePlayerInvestigationEnabled()) {
+            processInvisibleHostileMob(mob, player, playerLoc, detection, decibels, config);
+            return;
+        }
+
+        VoiceMobReactionContext targetContext = callMobReactionHooks(
+                player, mob, MobReactionType.HOSTILE_TARGET, detection, decibels
+        );
+        if (targetContext == null) {
             return;
         }
 
@@ -354,10 +395,21 @@ public class MobListener implements Listener {
 
         // NEW FEATURE: Mob group alerting
         if (config.isMobGroupAlertEnabled() && MobGroupAlert.isSocialMob(mob.getType())) {
-            int maxAlerts = MobGroupAlert.calculateAlertCount(distance, minRange, maxRange);
-            int alerted = MobGroupAlert.alertNearbyMobs(mob, player, maxAlerts);
+            VoiceMobReactionContext groupContext = callMobReactionHooks(
+                    player, mob, MobReactionType.GROUP_ALERT, detection, targetContext.getEffectiveDecibels()
+            );
+            if (groupContext == null) {
+                return;
+            }
 
-            if (alerted > 0 && plugin.getConfig().getBoolean("debug.group-alert-logging", false)) {
+            int maxAlerts = Math.min(
+                    config.getMaxMobAlerts(),
+                    MobGroupAlert.calculateAlertCount(distance, minRange, maxRange)
+            );
+            double alertRange = config.getGroupAlertRange(mob.getType().name());
+            int alerted = MobGroupAlert.alertNearbyMobs(mob, player, maxAlerts, alertRange);
+
+            if (alerted > 0 && config.isGroupAlertLoggingEnabled()) {
                 plugin.getLogger().info(String.format(
                         "%s alerted %d nearby %s(s)",
                         mob.getType(), alerted, mob.getType()
@@ -366,13 +418,117 @@ public class MobListener implements Listener {
         }
 
         // Debug logging
-        if (plugin.getConfig().getBoolean("debug.detection-logging", false)) {
+        if (config.isDetectionLoggingEnabled()) {
             plugin.getLogger().info(String.format(
                     "Hostile %s detected | %s",
                     mob.getType(),
-                    RangeCalculator.getDynamicDebugInfo(distance, minRange, maxRange, falloffCurve, decibels, volumeThresholdDb)
+                    detection.getDebugInfo()
             ));
         }
+    }
+
+    /**
+     * Processes hostile detection for invisible players using last-heard-location investigation.
+     */
+    private void processInvisibleHostileMob(Mob mob, Player player, Location heardLocation,
+                                            DetectionResult detection, double decibels, ConfigManager config) {
+        if (!startHostileInvestigation(mob, player, heardLocation, detection, decibels)) {
+            return;
+        }
+
+        if (config.isMobGroupAlertEnabled() && MobGroupAlert.isSocialMob(mob.getType())) {
+            VoiceMobReactionContext groupContext = callMobReactionHooks(
+                    player, mob, MobReactionType.GROUP_ALERT, detection, decibels
+            );
+            if (groupContext == null) {
+                return;
+            }
+
+            int maxAlerts = Math.min(
+                    config.getMaxMobAlerts(),
+                    MobGroupAlert.calculateAlertCount(
+                            detection.getDistance(),
+                            detection.getConfiguredMinRange(),
+                            detection.getConfiguredMaxRange()
+                    )
+            );
+            double alertRange = config.getGroupAlertRange(mob.getType().name());
+            int alerted = alertNearbyMobsToInvestigate(mob, player, heardLocation, detection, decibels, maxAlerts, alertRange);
+
+            if (alerted > 0 && config.isGroupAlertLoggingEnabled()) {
+                plugin.getLogger().info(String.format(
+                        "%s alerted %d nearby %s(s) to investigate voice",
+                        mob.getType(), alerted, mob.getType()
+                ));
+            }
+        }
+
+        if (config.isDetectionLoggingEnabled()) {
+            plugin.getLogger().info(String.format(
+                    "Hostile %s investigating invisible player | %s",
+                    mob.getType(),
+                    detection.getDebugInfo()
+            ));
+        }
+    }
+
+    /**
+     * Starts last-heard-location investigation if integration hooks allow it.
+     */
+    private boolean startHostileInvestigation(Mob mob, Player player, Location heardLocation,
+                                             DetectionResult detection, double decibels) {
+        VoiceMobReactionContext context = callMobReactionHooks(
+                player, mob, MobReactionType.HOSTILE_INVESTIGATE, detection, decibels
+        );
+        if (context == null) {
+            return false;
+        }
+
+        Location target = heardLocation.clone();
+        clearInvestigationTarget(mob, player);
+        hostileInvestigations.put(
+                mob.getUniqueId(),
+                new HostileInvestigation(player.getUniqueId(), target, System.currentTimeMillis())
+        );
+        mob.getPathfinder().moveTo(target);
+        return true;
+    }
+
+    /**
+     * Alerts same-type mobs to investigate the invisible player's last heard location.
+     */
+    private int alertNearbyMobsToInvestigate(Mob alertingMob, Player player, Location heardLocation,
+                                             DetectionResult detection, double decibels,
+                                             int maxAlerts, double alertRange) {
+        Location mobLoc = alertingMob.getLocation();
+        World world = mobLoc.getWorld();
+        if (world == null) {
+            return 0;
+        }
+
+        double safeAlertRange = Math.max(0.0, alertRange);
+        int alerted = 0;
+
+        for (Entity entity : world.getNearbyEntities(mobLoc, safeAlertRange, safeAlertRange, safeAlertRange)) {
+            if (alerted >= maxAlerts) {
+                break;
+            }
+
+            if (!(entity instanceof Mob) || entity.equals(alertingMob) || entity.getType() != alertingMob.getType()) {
+                continue;
+            }
+
+            Mob nearbyMob = (Mob) entity;
+            if (!MobCondition.canAttack(nearbyMob)) {
+                continue;
+            }
+
+            if (startHostileInvestigation(nearbyMob, player, heardLocation, detection, decibels)) {
+                alerted++;
+            }
+        }
+
+        return alerted;
     }
 
     /**
@@ -389,11 +545,6 @@ public class MobListener implements Listener {
             return;
         }
 
-        // Check threshold
-        if (decibels < config.getNeutralVolumeThresholdDb()) {
-            return;
-        }
-
         // Check reaction cooldown
         if (isOnReactionCooldown(mob, config.getNeutralReactionCooldownMs())) {
             return;
@@ -404,26 +555,24 @@ public class MobListener implements Listener {
         double minRange = applyRangeMultiplier(player, config.getNeutralMinRange());
         double falloffCurve = config.getNeutralFalloffCurve();
         double volumeThresholdDb = config.getNeutralVolumeThresholdDb();
-
-        // Calculate effective range based on volume
-        double effectiveMaxRange = RangeCalculator.calculateEffectiveRange(maxRange, decibels, volumeThresholdDb);
-
-        if (distance > effectiveMaxRange) {
-            return;
-        }
-
-        // Calculate detection chance with dynamic range
-        double detectionChance = RangeCalculator.calculateDynamicDetectionChance(
+        DetectionResult detection = DetectionService.calculate(
                 distance, minRange, maxRange, falloffCurve, decibels, volumeThresholdDb
         );
 
-        if (Math.random() > detectionChance) {
+        if (!detection.canAttemptDetection() || !RandomProvider.passes(detection.getChance())) {
             return;
         }
 
         // Apply reaction multiplier for special mobs (e.g., babies)
         double reactionChance = config.getNeutralReactionChance() * MobCondition.getReactionMultiplier(mob);
-        if (Math.random() > reactionChance) {
+        if (!RandomProvider.passes(reactionChance)) {
+            return;
+        }
+
+        VoiceMobReactionContext context = callMobReactionHooks(
+                player, mob, MobReactionType.NEUTRAL_LOOK, detection, decibels
+        );
+        if (context == null) {
             return;
         }
 
@@ -436,11 +585,11 @@ public class MobListener implements Listener {
         }
 
         // Debug logging
-        if (plugin.getConfig().getBoolean("debug.detection-logging", false)) {
+        if (config.isDetectionLoggingEnabled()) {
             plugin.getLogger().info(String.format(
                     "Neutral %s looked | %s",
                     mob.getType(),
-                    RangeCalculator.getDynamicDebugInfo(distance, minRange, maxRange, falloffCurve, decibels, volumeThresholdDb)
+                    detection.getDebugInfo()
             ));
         }
     }
@@ -459,46 +608,39 @@ public class MobListener implements Listener {
             return;
         }
 
-        // Check threshold
-        if (decibels < config.getPeacefulVolumeThresholdDb()) {
-            return;
-        }
-
         double distance = mob.getLocation().distance(playerLoc);
         double maxRange = applyRangeMultiplier(player, config.getPeacefulMaxRange());
         double minRange = applyRangeMultiplier(player, config.getPeacefulMinRange());
         double falloffCurve = config.getPeacefulFalloffCurve();
         double volumeThresholdDb = config.getPeacefulVolumeThresholdDb();
-
-        // Calculate effective range based on volume
-        double effectiveMaxRange = RangeCalculator.calculateEffectiveRange(maxRange, decibels, volumeThresholdDb);
-
-        if (distance > effectiveMaxRange) {
-            return;
-        }
-
-        // Calculate detection chance with dynamic range
-        double detectionChance = RangeCalculator.calculateDynamicDetectionChance(
+        DetectionResult detection = DetectionService.calculate(
                 distance, minRange, maxRange, falloffCurve, decibels, volumeThresholdDb
         );
 
-        if (Math.random() > detectionChance) {
+        if (!detection.canAttemptDetection() || !RandomProvider.passes(detection.getChance())) {
             return;
         }
 
         // Apply reaction multiplier for special mobs (e.g., babies)
         double reactionChance = config.getPeacefulReactionChance() * MobCondition.getReactionMultiplier(mob);
-        if (Math.random() > reactionChance) {
+        if (!RandomProvider.passes(reactionChance)) {
             return;
         }
 
         // Check if mob should flee from loud noise (flee overrides cooldown)
         if (config.isFleeEnabled() && decibels > config.getFleeVolumeDb() &&
                 !mob.hasMetadata(FLEE_META_KEY) && MobCondition.canFlee(mob)) {
+            VoiceMobReactionContext context = callMobReactionHooks(
+                    player, mob, MobReactionType.PEACEFUL_FLEE, detection, decibels
+            );
+            if (context == null) {
+                return;
+            }
+
             setReactionCooldown(mob);
             makeMobFlee(mob, player);
 
-            if (plugin.getConfig().getBoolean("debug.peaceful-logging", false)) {
+            if (config.isPeacefulLoggingEnabled()) {
                 plugin.getLogger().info(String.format(
                         "Peaceful %s fleeing | dB: %.1f | Distance: %.1f",
                         mob.getType(), decibels, distance
@@ -525,28 +667,33 @@ public class MobListener implements Listener {
 
         // Make mob look at player with duration (only if can look)
         if (config.shouldPeacefulLookAtPlayer() && MobCondition.canLookAt(mob)) {
-            makeMobLookAtWithDuration(mob, player.getLocation(), config.getPeacefulLookDurationTicks());
+            VoiceMobReactionContext lookContext = callMobReactionHooks(
+                    player, mob, MobReactionType.PEACEFUL_LOOK, detection, decibels
+            );
+            if (lookContext != null) {
+                makeMobLookAtWithDuration(mob, player.getLocation(), config.getPeacefulLookDurationTicks());
+            }
         }
 
         // If sneaking: check eye contact requirement and make mob follow (only if can follow)
         if (isSneaking && config.isFollowWhenSneakingEnabled() && MobCondition.canFollow(mob)) {
             if (config.requiresEyeContact()) {
                 if (hasRecentEyeContact(mob, player)) {
-                    startFollowing(mob, player);
+                    startFollowingIfAllowed(mob, player, detection, decibels);
                 }
             } else {
-                startFollowing(mob, player);
+                startFollowingIfAllowed(mob, player, detection, decibels);
             }
         }
 
         // Debug logging
-        if (plugin.getConfig().getBoolean("debug.peaceful-logging", false)) {
+        if (config.isPeacefulLoggingEnabled()) {
             String action = isSneaking ? "following" : "looked";
             plugin.getLogger().info(String.format(
                     "Peaceful %s %s | %s",
                     mob.getType(),
                     action,
-                    RangeCalculator.getDynamicDebugInfo(distance, minRange, maxRange, falloffCurve, decibels, volumeThresholdDb)
+                    detection.getDebugInfo()
             ));
         }
     }
@@ -574,6 +721,32 @@ public class MobListener implements Listener {
                 mob.getPathfinder().stopPathfinding();
             }
         }, fleeDurationTicks);
+    }
+
+    /**
+     * Calls registered integration hooks for a mob reaction.
+     *
+     * @return the context when allowed, or null when cancelled
+     */
+    private VoiceMobReactionContext callMobReactionHooks(Player player, Mob mob, MobReactionType reactionType,
+                                                        DetectionResult detection, double decibels) {
+        VoiceMobReactionContext context = new VoiceMobReactionContext(
+                player, mob, reactionType, detection.getDistance(), detection.getChance(), decibels
+        );
+        plugin.getApi().callMobReactionHooks(context);
+        return context.isCancelled() ? null : context;
+    }
+
+    /**
+     * Starts mob following only if integration hooks allow it.
+     */
+    private void startFollowingIfAllowed(Mob mob, Player player, DetectionResult detection, double decibels) {
+        VoiceMobReactionContext context = callMobReactionHooks(
+                player, mob, MobReactionType.PEACEFUL_FOLLOW, detection, decibels
+        );
+        if (context != null) {
+            startFollowing(mob, player);
+        }
     }
 
     /**
@@ -659,7 +832,7 @@ public class MobListener implements Listener {
         Bukkit.getScheduler().runTaskTimer(plugin, () -> {
             long currentTime = System.currentTimeMillis();
             ConfigManager config = plugin.getConfigManager();
-            int maxDuration = config.getFollowDuration() * 1000;
+            long maxDuration = config.getFollowDuration() * 1000L;
             double maxDistance = config.getFollowMaxDistance();
 
             followingMobs.entrySet().removeIf(entry -> {
@@ -701,10 +874,92 @@ public class MobListener implements Listener {
                 return false;
             });
 
-            reactionCooldowns.entrySet().removeIf(entry ->
-                    (currentTime - entry.getValue()) > 30000L
-            );
+            reactionCooldowns.entrySet().removeIf(entry -> {
+                Entity entity = Bukkit.getEntity(entry.getKey());
+                return entity == null || !entity.isValid() || (currentTime - entry.getValue()) > 30000L;
+            });
+
+            updateHostileInvestigations(currentTime, config);
         }, 20L, 20L);
+    }
+
+    /**
+     * Updates hostile mobs investigating invisible players by last heard location.
+     */
+    private void updateHostileInvestigations(long currentTime, ConfigManager config) {
+        long timeoutMs = config.getInvisiblePlayerInvestigationTimeout() * 1000L;
+        double movementTolerance = config.getInvisiblePlayerMovementTolerance();
+
+        hostileInvestigations.entrySet().removeIf(entry -> {
+            UUID mobId = entry.getKey();
+            HostileInvestigation investigation = entry.getValue();
+            Entity mobEntity = Bukkit.getEntity(mobId);
+            Player player = Bukkit.getPlayer(investigation.getPlayerId());
+
+            if (!(mobEntity instanceof Mob) || !mobEntity.isValid() || player == null || !player.isOnline()) {
+                return true;
+            }
+
+            Mob mob = (Mob) mobEntity;
+            Location heardLocation = investigation.getHeardLocation();
+
+            if ((currentTime - investigation.getStartTime()) > timeoutMs) {
+                clearInvestigationTarget(mob, player);
+                return true;
+            }
+
+            if (player.getWorld() == null || heardLocation.getWorld() == null ||
+                    !player.getWorld().equals(heardLocation.getWorld())) {
+                clearInvestigationTarget(mob, player);
+                return true;
+            }
+
+            if (!isInvisible(player)) {
+                clearInvestigationTarget(mob, player);
+                return true;
+            }
+
+            double movedDistanceSquared = player.getLocation().distanceSquared(heardLocation);
+            if (InvestigationMath.hasMovedBeyondTolerance(movedDistanceSquared, movementTolerance)) {
+                clearInvestigationTarget(mob, player);
+                return true;
+            }
+
+            mob.getPathfinder().moveTo(heardLocation);
+
+            if (!config.shouldInvisiblePlayerAttackIfStillThere()) {
+                return false;
+            }
+
+            if (mob.getLocation().getWorld() == null || !mob.getLocation().getWorld().equals(heardLocation.getWorld())) {
+                clearInvestigationTarget(mob, player);
+                return true;
+            }
+
+            double arrivalDistanceSquared = mob.getLocation().distanceSquared(heardLocation);
+            if (!investigation.hasTargetedPlayer() &&
+                    !InvestigationMath.hasMovedBeyondTolerance(arrivalDistanceSquared, INVESTIGATION_ARRIVAL_DISTANCE)) {
+                mob.setTarget(player);
+                investigation.setTargetedPlayer(true);
+                if (config.isDetectionLoggingEnabled()) {
+                    plugin.getLogger().info(String.format(
+                            "Hostile %s attacked invisible player still at last heard location",
+                            mob.getType()
+                    ));
+                }
+            }
+
+            return false;
+        });
+    }
+
+    /**
+     * Clears a target assigned by invisible-player investigation.
+     */
+    private void clearInvestigationTarget(Mob mob, Player player) {
+        if (mob.getTarget() != null && mob.getTarget().equals(player)) {
+            mob.setTarget(null);
+        }
     }
 
     /**
@@ -722,5 +977,43 @@ public class MobListener implements Listener {
         }
 
         followStartTime.remove(mobId);
+        reactionCooldowns.remove(mobId);
+        hostileInvestigations.remove(mobId);
+    }
+
+    /**
+     * State for hostile mobs investigating invisible players.
+     */
+    private static final class HostileInvestigation {
+        private final UUID playerId;
+        private final Location heardLocation;
+        private final long startTime;
+        private boolean targetedPlayer;
+
+        private HostileInvestigation(UUID playerId, Location heardLocation, long startTime) {
+            this.playerId = playerId;
+            this.heardLocation = heardLocation;
+            this.startTime = startTime;
+        }
+
+        private UUID getPlayerId() {
+            return playerId;
+        }
+
+        private Location getHeardLocation() {
+            return heardLocation;
+        }
+
+        private long getStartTime() {
+            return startTime;
+        }
+
+        private boolean hasTargetedPlayer() {
+            return targetedPlayer;
+        }
+
+        private void setTargetedPlayer(boolean targetedPlayer) {
+            this.targetedPlayer = targetedPlayer;
+        }
     }
 }

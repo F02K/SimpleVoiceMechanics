@@ -79,6 +79,13 @@ mob-hearing:
       - "PHANTOM"
       - "VEX"
 
+    # Invisible players are investigated by last heard location instead of chased directly
+    invisible-players:
+      enabled: true
+      movement-tolerance: 1.5
+      investigation-timeout: 8
+      attack-if-still-there: true
+
     # When one mob detects voice, it alerts nearby mobs of same type
     group-alert:
       enabled: true
@@ -195,6 +202,13 @@ sculk-hearing:
   falloff-curve: 0.9  # Sculk Sensors are more sensitive
   # Cooldown between activations (ms)
   cooldown: 1000
+  # Hard cap for block scan radius after volume scaling (performance safety)
+  max-scan-radius: 64
+  visuals:
+    # Shows the vanilla-style vibration particle travelling from the speaker to the sensor
+    vibration-particle: true
+    min-arrival-ticks: 5
+    max-arrival-ticks: 40
 
 # ----------------------------------------
 # Debug Options

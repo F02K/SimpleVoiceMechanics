@@ -1,7 +1,6 @@
 package de.tecca.simplevoicemechanics.manager;
 
 import de.tecca.simplevoicemechanics.SimpleVoiceMechanics;
-import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.EntityType;
 
@@ -19,7 +18,7 @@ import java.util.Set;
  *   <li>Per-category volume thresholds in decibels</li>
  *   <li>Mob blacklists</li>
  *   <li>Peaceful mob behaviors (look-at, follow-when-sneaking)</li>
- *   <li>Environmental modifiers (biome and weather)</li>
+ *   <li>Environmental modifiers (biome and time)</li>
  * </ul>
  *
  * @author Tecca
@@ -51,6 +50,10 @@ public class ConfigManager {
     private Double hostileFalloffCurve;
     private double hostileVolumeThresholdDb;
     private Set<EntityType> hostileBlacklist;
+    private boolean invisiblePlayerInvestigationEnabled;
+    private double invisiblePlayerMovementTolerance;
+    private int invisiblePlayerInvestigationTimeout;
+    private boolean invisiblePlayerAttackIfStillThere;
 
     // Neutral mobs
     private boolean neutralMobsEnabled;
@@ -102,11 +105,31 @@ public class ConfigManager {
     private Double sculkFalloffCurve;
     private double sculkVolumeThresholdDb;
     private long sculkCooldown;
+    private boolean sculkVibrationParticle;
+    private int sculkVibrationMinArrivalTicks;
+    private int sculkVibrationMaxArrivalTicks;
 
     // Environmental modifiers
     private boolean environmentalModifiersEnabled;
     private boolean biomeModifiersEnabled;
-    private boolean weatherModifiersEnabled;
+    private boolean timeModifiersEnabled;
+
+    // Mob group alerts
+    private boolean mobGroupAlertEnabled;
+    private int maxMobAlerts;
+
+    // Sculk performance
+    private int sculkMaxScanRadius;
+
+    // Debug settings
+    private boolean audioLoggingEnabled;
+    private boolean rangeLoggingEnabled;
+    private boolean detectionLoggingEnabled;
+    private boolean wardenLoggingEnabled;
+    private boolean sculkLoggingEnabled;
+    private boolean peacefulLoggingEnabled;
+    private boolean environmentalLoggingEnabled;
+    private boolean groupAlertLoggingEnabled;
 
     public ConfigManager(SimpleVoiceMechanics plugin) {
         this.plugin = plugin;
@@ -116,7 +139,7 @@ public class ConfigManager {
      * Loads configuration from disk.
      */
     public void loadConfig() {
-        plugin.saveDefaultConfig();
+        ConfigUpdater.update(plugin.getDataFolder(), plugin.getResource("config.yml"), plugin.getLogger());
         plugin.reloadConfig();
         config = plugin.getConfig();
 
@@ -124,15 +147,17 @@ public class ConfigManager {
         loadMobHearingSettings();
         loadSculkSettings();
         loadEnvironmentalSettings();
+        loadDebugSettings();
     }
 
     /**
      * Loads global detection settings.
      */
     private void loadGlobalSettings() {
-        defaultMaxRange = config.getDouble(PATH_DETECTION + ".max-range", 16.0);
-        defaultMinRange = config.getDouble(PATH_DETECTION + ".min-range", 2.0);
-        defaultFalloffCurve = config.getDouble(PATH_DETECTION + ".falloff-curve", 1.0);
+        defaultMaxRange = readNonNegativeDouble(PATH_DETECTION + ".max-range", 16.0);
+        defaultMinRange = readNonNegativeDouble(PATH_DETECTION + ".min-range", 2.0);
+        defaultMinRange = Math.min(defaultMinRange, defaultMaxRange);
+        defaultFalloffCurve = readClampedDouble(PATH_DETECTION + ".falloff-curve", 1.0, 0.0, 2.0);
     }
 
     /**
@@ -161,11 +186,21 @@ public class ConfigManager {
         String path = PATH_MOB_HEARING + ".hostile-mobs";
 
         hostileMobsEnabled = config.getBoolean(path + ".enabled", true);
-        hostileVolumeThresholdDb = config.getDouble(path + ".volume-threshold-db", -40.0);
-        hostileMaxRange = getOptionalDouble(path + ".max-range");
-        hostileMinRange = getOptionalDouble(path + ".min-range");
-        hostileFalloffCurve = getOptionalDouble(path + ".falloff-curve");
+        hostileVolumeThresholdDb = readClampedDouble(path + ".volume-threshold-db", -40.0, -127.0, 0.0);
+        hostileMaxRange = getOptionalNonNegativeDouble(path + ".max-range");
+        hostileMinRange = getOptionalNonNegativeDouble(path + ".min-range");
+        hostileFalloffCurve = getOptionalClampedDouble(path + ".falloff-curve", 0.0, 2.0);
         hostileBlacklist = loadBlacklist(path + ".blacklist");
+
+        String invisiblePath = path + ".invisible-players";
+        invisiblePlayerInvestigationEnabled = config.getBoolean(invisiblePath + ".enabled", true);
+        invisiblePlayerMovementTolerance = readNonNegativeDouble(invisiblePath + ".movement-tolerance", 1.5);
+        invisiblePlayerInvestigationTimeout = readNonNegativeInt(invisiblePath + ".investigation-timeout", 8);
+        invisiblePlayerAttackIfStillThere = config.getBoolean(invisiblePath + ".attack-if-still-there", true);
+
+        String groupAlertPath = path + ".group-alert";
+        mobGroupAlertEnabled = config.getBoolean(groupAlertPath + ".enabled", true);
+        maxMobAlerts = readNonNegativeInt(groupAlertPath + ".max-alerts", 5);
     }
 
     /**
@@ -176,13 +211,13 @@ public class ConfigManager {
 
         neutralMobsEnabled = config.getBoolean(path + ".enabled", true);
         neutralLookAtPlayer = config.getBoolean(path + ".look-at-player", true);
-        neutralVolumeThresholdDb = config.getDouble(path + ".volume-threshold-db", -35.0);
-        neutralReactionChance = config.getDouble(path + ".natural-behavior.reaction-chance", 0.6);
-        neutralLookDuration = config.getInt(path + ".natural-behavior.look-duration", 8);
-        neutralReactionCooldown = config.getInt(path + ".natural-behavior.reaction-cooldown", 3);
-        neutralMaxRange = getOptionalDouble(path + ".max-range");
-        neutralMinRange = getOptionalDouble(path + ".min-range");
-        neutralFalloffCurve = getOptionalDouble(path + ".falloff-curve");
+        neutralVolumeThresholdDb = readClampedDouble(path + ".volume-threshold-db", -35.0, -127.0, 0.0);
+        neutralReactionChance = readClampedDouble(path + ".natural-behavior.reaction-chance", 0.6, 0.0, 1.0);
+        neutralLookDuration = readNonNegativeInt(path + ".natural-behavior.look-duration", 8);
+        neutralReactionCooldown = readNonNegativeInt(path + ".natural-behavior.reaction-cooldown", 3);
+        neutralMaxRange = getOptionalNonNegativeDouble(path + ".max-range");
+        neutralMinRange = getOptionalNonNegativeDouble(path + ".min-range");
+        neutralFalloffCurve = getOptionalClampedDouble(path + ".falloff-curve", 0.0, 2.0);
         neutralBlacklist = loadBlacklist(path + ".blacklist");
     }
 
@@ -194,30 +229,30 @@ public class ConfigManager {
 
         peacefulMobsEnabled = config.getBoolean(path + ".enabled", true);
         peacefulLookAtPlayer = config.getBoolean(path + ".look-at-player", true);
-        peacefulVolumeThresholdDb = config.getDouble(path + ".volume-threshold-db", -30.0);
-        peacefulReactionChance = config.getDouble(path + ".natural-behavior.reaction-chance", 0.7);
-        peacefulLookDuration = config.getInt(path + ".natural-behavior.look-duration", 10);
-        peacefulReactionCooldown = config.getInt(path + ".natural-behavior.reaction-cooldown", 3);
-        peacefulMaxRange = getOptionalDouble(path + ".max-range");
-        peacefulMinRange = getOptionalDouble(path + ".min-range");
-        peacefulFalloffCurve = getOptionalDouble(path + ".falloff-curve");
+        peacefulVolumeThresholdDb = readClampedDouble(path + ".volume-threshold-db", -30.0, -127.0, 0.0);
+        peacefulReactionChance = readClampedDouble(path + ".natural-behavior.reaction-chance", 0.7, 0.0, 1.0);
+        peacefulLookDuration = readNonNegativeInt(path + ".natural-behavior.look-duration", 10);
+        peacefulReactionCooldown = readNonNegativeInt(path + ".natural-behavior.reaction-cooldown", 3);
+        peacefulMaxRange = getOptionalNonNegativeDouble(path + ".max-range");
+        peacefulMinRange = getOptionalNonNegativeDouble(path + ".min-range");
+        peacefulFalloffCurve = getOptionalClampedDouble(path + ".falloff-curve", 0.0, 2.0);
         peacefulBlacklist = loadBlacklist(path + ".blacklist");
 
         // Flee behavior (all in seconds from config)
         String fleePath = path + ".flee-behavior";
         fleeEnabled = config.getBoolean(fleePath + ".enabled", true);
-        fleeVolumeDb = config.getDouble(fleePath + ".flee-volume-db", -20.0);
-        fleeDistance = config.getDouble(fleePath + ".flee-distance", 3.0);
-        fleeDuration = config.getInt(fleePath + ".flee-duration", 3);  // seconds
+        fleeVolumeDb = readClampedDouble(fleePath + ".flee-volume-db", -20.0, -127.0, 0.0);
+        fleeDistance = readNonNegativeDouble(fleePath + ".flee-distance", 3.0);
+        fleeDuration = readNonNegativeInt(fleePath + ".flee-duration", 3);  // seconds
 
         // Follow when sneaking (all in seconds from config)
         String followPath = path + ".follow-when-sneaking";
         followWhenSneakingEnabled = config.getBoolean(followPath + ".enabled", true);
         requireEyeContact = config.getBoolean(followPath + ".require-eye-contact", true);
-        eyeContactRange = config.getDouble(followPath + ".eye-contact-range", 4.0);
-        eyeContactMemory = config.getInt(followPath + ".eye-contact-memory", 5);  // seconds
-        followDuration = config.getInt(followPath + ".duration", 60);  // seconds
-        followMaxDistance = config.getDouble(followPath + ".max-distance", 12.0);
+        eyeContactRange = readNonNegativeDouble(followPath + ".eye-contact-range", 4.0);
+        eyeContactMemory = readNonNegativeInt(followPath + ".eye-contact-memory", 5);  // seconds
+        followDuration = readNonNegativeInt(followPath + ".duration", 60);  // seconds
+        followMaxDistance = readNonNegativeDouble(followPath + ".max-distance", 12.0);
     }
 
     /**
@@ -227,10 +262,10 @@ public class ConfigManager {
         String path = PATH_MOB_HEARING + ".warden";
 
         wardenEnabled = config.getBoolean(path + ".enabled", true);
-        wardenVolumeThresholdDb = config.getDouble(path + ".volume-threshold-db", -50.0);
-        wardenMaxRange = getOptionalDouble(path + ".max-range");
-        wardenMinRange = getOptionalDouble(path + ".min-range");
-        wardenFalloffCurve = getOptionalDouble(path + ".falloff-curve");
+        wardenVolumeThresholdDb = readClampedDouble(path + ".volume-threshold-db", -50.0, -127.0, 0.0);
+        wardenMaxRange = getOptionalNonNegativeDouble(path + ".max-range");
+        wardenMinRange = getOptionalNonNegativeDouble(path + ".min-range");
+        wardenFalloffCurve = getOptionalClampedDouble(path + ".falloff-curve", 0.0, 2.0);
     }
 
     /**
@@ -238,11 +273,20 @@ public class ConfigManager {
      */
     private void loadSculkSettings() {
         sculkEnabled = config.getBoolean(PATH_SCULK + ".enabled", true);
-        sculkVolumeThresholdDb = config.getDouble(PATH_SCULK + ".volume-threshold-db", -45.0);
-        sculkMaxRange = getOptionalDouble(PATH_SCULK + ".max-range");
-        sculkMinRange = getOptionalDouble(PATH_SCULK + ".min-range");
-        sculkFalloffCurve = getOptionalDouble(PATH_SCULK + ".falloff-curve");
-        sculkCooldown = config.getLong(PATH_SCULK + ".cooldown", 1000);
+        sculkVolumeThresholdDb = readClampedDouble(PATH_SCULK + ".volume-threshold-db", -20.0, -127.0, 0.0);
+        sculkMaxRange = getOptionalNonNegativeDouble(PATH_SCULK + ".max-range");
+        sculkMinRange = getOptionalNonNegativeDouble(PATH_SCULK + ".min-range");
+        sculkFalloffCurve = getOptionalClampedDouble(PATH_SCULK + ".falloff-curve", 0.0, 2.0);
+        sculkCooldown = readNonNegativeLong(PATH_SCULK + ".cooldown", 1000);
+        sculkMaxScanRadius = readNonNegativeInt(PATH_SCULK + ".max-scan-radius", 64);
+
+        String visualsPath = PATH_SCULK + ".visuals";
+        sculkVibrationParticle = config.getBoolean(visualsPath + ".vibration-particle", true);
+        sculkVibrationMinArrivalTicks = readNonNegativeInt(visualsPath + ".min-arrival-ticks", 5);
+        sculkVibrationMaxArrivalTicks = Math.max(
+                sculkVibrationMinArrivalTicks,
+                readNonNegativeInt(visualsPath + ".max-arrival-ticks", 40)
+        );
     }
 
     /**
@@ -251,18 +295,60 @@ public class ConfigManager {
     private void loadEnvironmentalSettings() {
         environmentalModifiersEnabled = config.getBoolean(PATH_ENVIRONMENTAL + ".enabled", true);
         biomeModifiersEnabled = config.getBoolean(PATH_ENVIRONMENTAL + ".biome-modifiers.enabled", true);
-        weatherModifiersEnabled = config.getBoolean(PATH_ENVIRONMENTAL + ".weather-modifiers.enabled", true);
+        timeModifiersEnabled = config.getBoolean(PATH_ENVIRONMENTAL + ".time-modifiers.enabled", true);
+    }
+
+    /**
+     * Loads debug logging flags.
+     */
+    private void loadDebugSettings() {
+        audioLoggingEnabled = config.getBoolean("debug.audio-logging", false);
+        rangeLoggingEnabled = config.getBoolean("debug.range-logging", false);
+        detectionLoggingEnabled = config.getBoolean("debug.detection-logging", false);
+        wardenLoggingEnabled = config.getBoolean("debug.warden-logging", false);
+        sculkLoggingEnabled = config.getBoolean("debug.sculk-logging", false);
+        peacefulLoggingEnabled = config.getBoolean("debug.peaceful-logging", false);
+        environmentalLoggingEnabled = config.getBoolean("debug.environmental-logging", false);
+        groupAlertLoggingEnabled = config.getBoolean("debug.group-alert-logging", false);
     }
 
     /**
      * Gets optional double from config (returns null if not set or null).
      */
-    private Double getOptionalDouble(String path) {
+    private Double getOptionalNonNegativeDouble(String path) {
         if (!config.isSet(path) || config.getString(path) == null ||
                 config.getString(path).equalsIgnoreCase("null")) {
             return null;
         }
-        return config.getDouble(path);
+        return Math.max(0.0, config.getDouble(path));
+    }
+
+    private Double getOptionalClampedDouble(String path, double min, double max) {
+        if (!config.isSet(path) || config.getString(path) == null ||
+                config.getString(path).equalsIgnoreCase("null")) {
+            return null;
+        }
+        return clamp(config.getDouble(path), min, max);
+    }
+
+    private double readNonNegativeDouble(String path, double defaultValue) {
+        return Math.max(0.0, config.getDouble(path, defaultValue));
+    }
+
+    private int readNonNegativeInt(String path, int defaultValue) {
+        return Math.max(0, config.getInt(path, defaultValue));
+    }
+
+    private long readNonNegativeLong(String path, long defaultValue) {
+        return Math.max(0L, config.getLong(path, defaultValue));
+    }
+
+    private double readClampedDouble(String path, double defaultValue, double min, double max) {
+        return clamp(config.getDouble(path, defaultValue), min, max);
+    }
+
+    private double clamp(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     /**
@@ -304,16 +390,20 @@ public class ConfigManager {
     // Hostile mobs
     public boolean isHostileMobsEnabled() { return hostileMobsEnabled; }
     public double getHostileMaxRange() { return hostileMaxRange != null ? hostileMaxRange : defaultMaxRange; }
-    public double getHostileMinRange() { return hostileMinRange != null ? hostileMinRange : defaultMinRange; }
+    public double getHostileMinRange() { return Math.min(hostileMinRange != null ? hostileMinRange : defaultMinRange, getHostileMaxRange()); }
     public double getHostileFalloffCurve() { return hostileFalloffCurve != null ? hostileFalloffCurve : defaultFalloffCurve; }
     public double getHostileVolumeThresholdDb() { return hostileVolumeThresholdDb; }
     public boolean isHostileBlacklisted(EntityType type) { return hostileBlacklist.contains(type); }
+    public boolean isInvisiblePlayerInvestigationEnabled() { return invisiblePlayerInvestigationEnabled; }
+    public double getInvisiblePlayerMovementTolerance() { return invisiblePlayerMovementTolerance; }
+    public int getInvisiblePlayerInvestigationTimeout() { return invisiblePlayerInvestigationTimeout; }
+    public boolean shouldInvisiblePlayerAttackIfStillThere() { return invisiblePlayerAttackIfStillThere; }
 
     // Neutral mobs
     public boolean isNeutralMobsEnabled() { return neutralMobsEnabled; }
     public boolean shouldNeutralLookAtPlayer() { return neutralLookAtPlayer; }
     public double getNeutralMaxRange() { return neutralMaxRange != null ? neutralMaxRange : defaultMaxRange; }
-    public double getNeutralMinRange() { return neutralMinRange != null ? neutralMinRange : defaultMinRange; }
+    public double getNeutralMinRange() { return Math.min(neutralMinRange != null ? neutralMinRange : defaultMinRange, getNeutralMaxRange()); }
     public double getNeutralFalloffCurve() { return neutralFalloffCurve != null ? neutralFalloffCurve : defaultFalloffCurve; }
     public double getNeutralVolumeThresholdDb() { return neutralVolumeThresholdDb; }
     public double getNeutralReactionChance() { return neutralReactionChance; }
@@ -325,7 +415,7 @@ public class ConfigManager {
     public boolean isPeacefulMobsEnabled() { return peacefulMobsEnabled; }
     public boolean shouldPeacefulLookAtPlayer() { return peacefulLookAtPlayer; }
     public double getPeacefulMaxRange() { return peacefulMaxRange != null ? peacefulMaxRange : defaultMaxRange; }
-    public double getPeacefulMinRange() { return peacefulMinRange != null ? peacefulMinRange : defaultMinRange; }
+    public double getPeacefulMinRange() { return Math.min(peacefulMinRange != null ? peacefulMinRange : defaultMinRange, getPeacefulMaxRange()); }
     public double getPeacefulFalloffCurve() { return peacefulFalloffCurve != null ? peacefulFalloffCurve : defaultFalloffCurve; }
     public double getPeacefulVolumeThresholdDb() { return peacefulVolumeThresholdDb; }
     public double getPeacefulReactionChance() { return peacefulReactionChance; }
@@ -348,21 +438,25 @@ public class ConfigManager {
     // Warden
     public boolean isWardenEnabled() { return wardenEnabled; }
     public double getWardenMaxRange() { return wardenMaxRange != null ? wardenMaxRange : defaultMaxRange; }
-    public double getWardenMinRange() { return wardenMinRange != null ? wardenMinRange : defaultMinRange; }
+    public double getWardenMinRange() { return Math.min(wardenMinRange != null ? wardenMinRange : defaultMinRange, getWardenMaxRange()); }
     public double getWardenFalloffCurve() { return wardenFalloffCurve != null ? wardenFalloffCurve : defaultFalloffCurve; }
     public double getWardenVolumeThresholdDb() { return wardenVolumeThresholdDb; }
 
     // Sculk
     public boolean isSculkEnabled() { return sculkEnabled; }
     public double getSculkMaxRange() { return sculkMaxRange != null ? sculkMaxRange : defaultMaxRange; }
-    public double getSculkMinRange() { return sculkMinRange != null ? sculkMinRange : defaultMinRange; }
+    public double getSculkMinRange() { return Math.min(sculkMinRange != null ? sculkMinRange : defaultMinRange, getSculkMaxRange()); }
     public double getSculkFalloffCurve() { return sculkFalloffCurve != null ? sculkFalloffCurve : defaultFalloffCurve; }
     public double getSculkVolumeThresholdDb() { return sculkVolumeThresholdDb; }
     public long getSculkCooldown() { return sculkCooldown; }
+    public int getSculkMaxScanRadius() { return sculkMaxScanRadius; }
+    public boolean isSculkVibrationParticleEnabled() { return sculkVibrationParticle; }
+    public int getSculkVibrationMinArrivalTicks() { return sculkVibrationMinArrivalTicks; }
+    public int getSculkVibrationMaxArrivalTicks() { return sculkVibrationMaxArrivalTicks; }
 
     // Environmental modifiers
     public boolean isEnvironmentalModifiersEnabled() { return environmentalModifiersEnabled; }
-    public boolean isWeatherModifiersEnabled() { return weatherModifiersEnabled && environmentalModifiersEnabled; }
+    public boolean isWeatherModifiersEnabled() { return false; }
 
     // Legacy compatibility (deprecated)
     @Deprecated
@@ -407,24 +501,34 @@ public class ConfigManager {
     }
 
     public boolean isBiomeModifiersEnabled() {
-        return config.getBoolean("environmental-modifiers.biome-modifiers.enabled", true);
+        return biomeModifiersEnabled && environmentalModifiersEnabled;
     }
 
     public boolean isTimeModifiersEnabled() {
-        return config.getBoolean("environmental-modifiers.time-modifiers.enabled", true);
+        return timeModifiersEnabled && environmentalModifiersEnabled;
     }
 
     // Mob Group Alert
     public boolean isMobGroupAlertEnabled() {
-        return config.getBoolean("mob-hearing.hostile-mobs.group-alert.enabled", true);
+        return mobGroupAlertEnabled;
     }
 
     public int getMaxMobAlerts() {
-        return config.getInt("mob-hearing.hostile-mobs.group-alert.max-alerts", 5);
+        return maxMobAlerts;
     }
 
     public double getGroupAlertRange(String mobType) {
         String path = "mob-hearing.hostile-mobs.group-alert.ranges." + mobType.toLowerCase();
-        return config.getDouble(path, 16.0);
+        return readNonNegativeDouble(path, 16.0);
     }
+
+    // Debug
+    public boolean isAudioLoggingEnabled() { return audioLoggingEnabled; }
+    public boolean isRangeLoggingEnabled() { return rangeLoggingEnabled; }
+    public boolean isDetectionLoggingEnabled() { return detectionLoggingEnabled; }
+    public boolean isWardenLoggingEnabled() { return wardenLoggingEnabled; }
+    public boolean isSculkLoggingEnabled() { return sculkLoggingEnabled; }
+    public boolean isPeacefulLoggingEnabled() { return peacefulLoggingEnabled; }
+    public boolean isEnvironmentalLoggingEnabled() { return environmentalLoggingEnabled; }
+    public boolean isGroupAlertLoggingEnabled() { return groupAlertLoggingEnabled; }
 }

@@ -210,6 +210,57 @@ public class VoiceCommand implements CommandExecutor {
             sender.sendMessage(ChatColor.GRAY + "  Cooldown: " +
                     ChatColor.WHITE + config.getSculkCooldown() + "ms");
         }
+
+        sender.sendMessage("");
+        sender.sendMessage(ChatColor.YELLOW + "Developer API: " + formatApiStatus());
+        sender.sendMessage(ChatColor.YELLOW + "Debug Logging: " + formatDebugStatus(config));
+    }
+
+    /**
+     * Formats public API service status.
+     */
+    private String formatApiStatus() {
+        if (plugin.getApi() == null) {
+            return ChatColor.RED + "Unavailable";
+        }
+
+        int detectionHooks = plugin.getApi().getDetectionHookCount();
+        int mobHooks = plugin.getApi().getMobReactionHookCount();
+        int sculkHooks = plugin.getApi().getSculkActivationHookCount();
+        return ChatColor.GREEN + "Enabled" + ChatColor.GRAY + " (" +
+                ChatColor.WHITE + detectionHooks + ChatColor.GRAY + " detection, " +
+                ChatColor.WHITE + mobHooks + ChatColor.GRAY + " mob, " +
+                ChatColor.WHITE + sculkHooks + ChatColor.GRAY + " sculk hooks)";
+    }
+
+    /**
+     * Formats active debug logging flags.
+     */
+    private String formatDebugStatus(ConfigManager config) {
+        StringBuilder active = new StringBuilder();
+        appendDebugFlag(active, config.isAudioLoggingEnabled(), "audio");
+        appendDebugFlag(active, config.isRangeLoggingEnabled(), "range");
+        appendDebugFlag(active, config.isDetectionLoggingEnabled(), "detection");
+        appendDebugFlag(active, config.isWardenLoggingEnabled(), "warden");
+        appendDebugFlag(active, config.isSculkLoggingEnabled(), "sculk");
+        appendDebugFlag(active, config.isPeacefulLoggingEnabled(), "peaceful");
+        appendDebugFlag(active, config.isEnvironmentalLoggingEnabled(), "environmental");
+        appendDebugFlag(active, config.isGroupAlertLoggingEnabled(), "group-alert");
+
+        if (active.length() == 0) {
+            return ChatColor.RED + "none enabled";
+        }
+        return ChatColor.GREEN + active.toString();
+    }
+
+    private void appendDebugFlag(StringBuilder builder, boolean enabled, String name) {
+        if (!enabled) {
+            return;
+        }
+        if (builder.length() > 0) {
+            builder.append(ChatColor.GRAY).append(", ").append(ChatColor.GREEN);
+        }
+        builder.append(name);
     }
 
     /**

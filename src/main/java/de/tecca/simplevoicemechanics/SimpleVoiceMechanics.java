@@ -1,12 +1,16 @@
 package de.tecca.simplevoicemechanics;
 
 import de.maxhenkel.voicechat.api.BukkitVoicechatService;
+import de.tecca.simplevoicemechanics.api.SimpleVoiceMechanicsApi;
+import de.tecca.simplevoicemechanics.api.SimpleVoiceMechanicsApiImpl;
 import de.tecca.simplevoicemechanics.command.VoiceCommand;
 import de.tecca.simplevoicemechanics.handler.VoiceHandler;
 import de.tecca.simplevoicemechanics.listener.MobListener;
 import de.tecca.simplevoicemechanics.listener.SculkListener;
 import de.tecca.simplevoicemechanics.manager.ConfigManager;
+import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.plugin.ServicePriority;
 
 /**
  * Main plugin class for SimpleVoiceMechanics.
@@ -43,6 +47,9 @@ public final class SimpleVoiceMechanics extends JavaPlugin {
     /** Manager for plugin configuration */
     private ConfigManager configManager;
 
+    /** Public integration API exposed through Bukkit services */
+    private SimpleVoiceMechanicsApiImpl api;
+
     /**
      * Called when the plugin is enabled.
      *
@@ -56,6 +63,10 @@ public final class SimpleVoiceMechanics extends JavaPlugin {
         // Initialize configuration
         configManager = new ConfigManager(this);
         configManager.loadConfig();
+
+        // Register public API service for other plugins
+        api = new SimpleVoiceMechanicsApiImpl(this);
+        getServer().getServicesManager().register(SimpleVoiceMechanicsApi.class, api, this, ServicePriority.Normal);
 
         // Register SimpleVoiceChat service
         if (!initializeVoiceChat()) {
@@ -78,6 +89,9 @@ public final class SimpleVoiceMechanics extends JavaPlugin {
      */
     @Override
     public void onDisable() {
+        if (api != null) {
+            getServer().getServicesManager().unregister(SimpleVoiceMechanicsApi.class, api);
+        }
         getLogger().info("SimpleVoiceMechanics disabled!");
     }
 
@@ -116,7 +130,12 @@ public final class SimpleVoiceMechanics extends JavaPlugin {
      * Registers all commands for the plugin.
      */
     private void registerCommands() {
-        getCommand("voicelistener").setExecutor(new VoiceCommand(this));
+        PluginCommand command = getCommand("voicelistener");
+        if (command == null) {
+            getLogger().severe("Command voicelistener is missing from plugin.yml");
+            return;
+        }
+        command.setExecutor(new VoiceCommand(this));
         getLogger().info("Commands registered (/voicelistener)");
     }
 
@@ -145,5 +164,14 @@ public final class SimpleVoiceMechanics extends JavaPlugin {
      */
     public ConfigManager getConfigManager() {
         return configManager;
+    }
+
+    /**
+     * Gets the public SimpleVoiceMechanics API service implementation.
+     *
+     * @return the API service implementation
+     */
+    public SimpleVoiceMechanicsApiImpl getApi() {
+        return api;
     }
 }
