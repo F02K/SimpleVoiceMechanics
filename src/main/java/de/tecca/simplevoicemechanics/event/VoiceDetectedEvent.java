@@ -12,7 +12,7 @@ import org.bukkit.event.HandlerList;
  * <p>This event provides:
  * <ul>
  *   <li>The speaking player</li>
- *   <li>The location where voice was detected</li>
+ *   <li>The source location of the voice</li>
  *   <li>The audio level in decibels</li>
  * </ul>
  *
@@ -41,7 +41,7 @@ public class VoiceDetectedEvent extends Event implements Cancellable {
      * Constructs a new VoiceDetectedEvent.
      *
      * @param player the player who spoke
-     * @param location the location where voice was detected
+     * @param location the source location of the voice
      * @param decibels the audio level in decibels (-127 to 0)
      */
     public VoiceDetectedEvent(Player player, Location location, double decibels) {
@@ -60,7 +60,7 @@ public class VoiceDetectedEvent extends Event implements Cancellable {
     }
 
     /**
-     * Gets the location where voice was detected.
+     * Gets the source location of the voice.
      *
      * @return the voice location
      */

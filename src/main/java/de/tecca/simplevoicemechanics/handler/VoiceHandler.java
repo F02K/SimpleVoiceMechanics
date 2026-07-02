@@ -9,6 +9,7 @@ import de.tecca.simplevoicemechanics.SimpleVoiceMechanics;
 import de.tecca.simplevoicemechanics.api.VoiceDetectionContext;
 import de.tecca.simplevoicemechanics.event.VoiceDetectedEvent;
 import de.tecca.simplevoicemechanics.util.AudioUtils;
+import de.tecca.simplevoicemechanics.util.PluginPermissions;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
@@ -33,6 +34,7 @@ public class VoiceHandler implements VoicechatPlugin {
 
     /** Plugin ID for SimpleVoiceChat registration */
     private static final String PLUGIN_ID = "simplevoicemechanics";
+    private static final double VOICE_SOURCE_Y_OFFSET = 1.0;
 
     private final SimpleVoiceMechanics plugin;
     private VoicechatApi voicechatApi;
@@ -96,12 +98,12 @@ public class VoiceHandler implements VoicechatPlugin {
                 return;
             }
 
-            if (player.hasPermission("voicelistener.bypass")) {
+            if (PluginPermissions.hasBypass(player)) {
                 return;
             }
 
-            Location playerLoc = player.getLocation();
-            VoiceDetectionContext context = new VoiceDetectionContext(player, playerLoc, db, db);
+            Location voiceLoc = player.getLocation().add(0.0, VOICE_SOURCE_Y_OFFSET, 0.0);
+            VoiceDetectionContext context = new VoiceDetectionContext(player, voiceLoc, db, db);
             plugin.getApi().callDetectionHooks(context);
 
             if (context.isCancelled()) {
@@ -118,7 +120,7 @@ public class VoiceHandler implements VoicechatPlugin {
                 ));
             }
 
-            VoiceDetectedEvent voiceEvent = new VoiceDetectedEvent(player, playerLoc, context.getEffectiveDecibels());
+            VoiceDetectedEvent voiceEvent = new VoiceDetectedEvent(player, voiceLoc, context.getEffectiveDecibels());
             Bukkit.getPluginManager().callEvent(voiceEvent);
         });
     }

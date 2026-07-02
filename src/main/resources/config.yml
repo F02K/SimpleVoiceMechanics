@@ -27,6 +27,18 @@ detection:
   # 2.0 = very strong falloff (almost full volume everywhere)
   falloff-curve: 1.0
 
+  # Sneaking makes speaking slightly safer, but not silent
+  sneaking-reduction:
+    enabled: true
+    decibel-reduction: 6.0
+
+  # Cheap block muffling sampled between speaker and listener after range checks
+  obstruction-muffling:
+    enabled: true
+    max-db-reduction: 18.0
+    wool-db-reduction: 12.0
+    solid-block-db-reduction: 4.0
+
 # ----------------------------------------
 # Environmental Modifiers
 # ----------------------------------------
@@ -55,6 +67,16 @@ environmental-modifiers:
     # DUSK: 1.15x range, -4 dB (Slightly more sensitive)
     # NIGHT: 1.3x range, -8 dB (Mobs very alert)
     # DAWN: 1.15x range, -4 dB (Slightly more sensitive)
+
+  # Weather masks voice, especially during thunderstorms
+  weather-modifiers:
+    enabled: true
+    rain:
+      range-multiplier: 0.85
+      threshold-adjustment-db: 3.0
+    thunder:
+      range-multiplier: 0.70
+      threshold-adjustment-db: 6.0
 
 # ----------------------------------------
 # Mob Hearing Mechanics
@@ -86,9 +108,17 @@ mob-hearing:
       investigation-timeout: 8
       attack-if-still-there: true
 
+    # Heard voice first sends mobs to the last heard location.
+    # Repeated, close, or very loud detections escalate to targeting.
+    investigation:
+      enabled: true
+      memory-seconds: 10
+      detections-to-target: 2
+
     # When one mob detects voice, it alerts nearby mobs of same type
     group-alert:
       enabled: true
+      only-after-targeting: true
       max-alerts: 5  # Maximum mobs to alert per detection
       # Mob-specific alert ranges (optional overrides)
       # Closer detections = more mobs alerted (1-5 dynamically)
@@ -163,6 +193,8 @@ mob-hearing:
     # Sneaking + Talking = Mobs follow
     follow-when-sneaking:
       enabled: true
+      # Vanilla+ mode: mobs only follow when the player holds their normal temptation item
+      require-tempt-item: true
       # Must look at mob first before it follows
       require-eye-contact: true
       # Eye contact detection range (blocks)
@@ -197,7 +229,10 @@ sculk-hearing:
   # Volume threshold for Sculk Sensors
   # Recommended: -20 (loud speaking, like vanilla)
   volume-threshold-db: -20.0
-  max-range: 16.0  # Standard Sculk Sensor Range
+  # Added to each sensor's vanilla listener range.
+  # Regular sensors use their block state's listener range, calibrated sensors do too.
+  # 0.0 = vanilla, positive = louder world, negative = quieter world
+  range-offset: 0.0
   min-range: 2.0
   falloff-curve: 0.9  # Sculk Sensors are more sensitive
   # Cooldown between activations (ms)
@@ -205,7 +240,7 @@ sculk-hearing:
   # Hard cap for block scan radius after volume scaling (performance safety)
   max-scan-radius: 64
   visuals:
-    # Shows the vanilla-style vibration particle travelling from the speaker to the sensor
+    # Deprecated compatibility settings. Vanilla game events now provide the vibration particle.
     vibration-particle: true
     min-arrival-ticks: 5
     max-arrival-ticks: 40

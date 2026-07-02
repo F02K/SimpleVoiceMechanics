@@ -7,25 +7,26 @@ Realistic mob reactions to voice in Minecraft. Uses Simple Voice Chat for dynami
 - **Real-time Audio Analysis**: Opus decoding with dB calculation
 - **Dynamic Range**: Louder voices heard from further away (40%-220% of base range)
 - **Environmental Modifiers**: Biome & time-based acoustics (caves echo, forests dampen, night = more sensitive)
+- **Vanilla+ Acoustics**: Rain, sneaking, wool, carpet, and solid blocks muffle voice
 - **Mob Group Alerts**: Hostile mobs call reinforcements (zombies summon hordes, wolves hunt in packs)
-- **Natural Behavior**: Probabilistic reactions, cooldowns, eye contact system
+- **Natural Behavior**: Probabilistic reactions, cooldowns, eye contact, investigation before attacks
 - **4 Mob Categories**: Hostile (attack), Neutral (look), Peaceful (look/flee/follow), Warden (anger system)
-- **Sculk Sensors**: GameEvent-based activation on loud voices
+- **Sculk Sensors**: Per-sensor voice activation on loud voices
 
 ### Mob Behavior
 
 | Category | Reaction | Threshold | Special Features |
 |----------|----------|-----------|------------------|
-| **Hostile** | Attack | -40 dB | Target player, **alert nearby allies (NEW)** |
+| **Hostile** | Investigate/Attack | -40 dB | Last heard location, then targeting and alerts |
 | **Neutral** | Look (8s) | -35 dB | 60% reaction chance |
-| **Peaceful** | Look (10s) | -30 dB | Flee at >-20 dB, Follow when sneaking + eye contact |
+| **Peaceful** | Look (10s) | -30 dB | Flee at >-20 dB, Follow with temptation item |
 | **Warden** | Anger +15-60 | -20 dB | Volume & distance dependent |
 | **Sculk** | Activate | -20 dB | Only on loud voices |
 
 **Peaceful Mobs Details:**
 - Normal speaking: Look at player
 - Loud speaking (>-20 dB): Flee 3 blocks away
-- Sneaking + Speaking + Eye contact: Follow for 60s
+- Sneaking + Speaking + Eye contact + temptation item: Follow for 60s
 
 ### Environmental Effects
 
@@ -73,7 +74,34 @@ environmental-modifiers:
     enabled: true           # Caves echo, forests dampen
   time-modifiers:
     enabled: true           # Night = 30% more range, 8 dB more sensitive
+  weather-modifiers:
+    enabled: true           # Rain/thunder muffle voice
 ```
+
+### Vanilla+ Acoustic Modifiers
+```yaml
+detection:
+  sneaking-reduction:
+    enabled: true
+    decibel-reduction: 6.0  # Sneaking makes voice quieter, not silent
+  obstruction-muffling:
+    enabled: true
+    max-db-reduction: 18.0
+    wool-db-reduction: 12.0
+    solid-block-db-reduction: 4.0
+```
+
+### Sculk Sensor Range
+```yaml
+sculk-hearing:
+  volume-threshold-db: -20.0
+  range-offset: 0.0        # Added to each sensor's vanilla listener range
+  min-range: 2.0
+```
+
+`range-offset` is signed: `0.0` keeps vanilla sensor range, positive values extend it, and negative values reduce it.
+
+Voice-triggered sculk behavior uses a vanilla game event from the speaker position after plugin checks pass, so vanilla handles the sensor activation and vibration particle.
 
 ### Mob Group Alerts
 ```yaml
@@ -81,6 +109,7 @@ mob-hearing:
   hostile-mobs:
     group-alert:
       enabled: true
+      only-after-targeting: true
       max-alerts: 5         # Max mobs to summon per detection
       ranges:
         zombie: 16.0        # Horde radius
@@ -105,6 +134,7 @@ peaceful-mobs:
     flee-duration: 3
   follow-when-sneaking:
     enabled: true
+    require-tempt-item: true
     require-eye-contact: true
     eye-contact-range: 4.0
     eye-contact-memory: 5
@@ -123,15 +153,18 @@ peaceful-mobs:
 
 ## Commands
 
-- `/voicelistener reload` - Reload config
-- `/voicelistener toggle <hostile|neutral|peaceful|warden|sculk>` - Toggle category
-- `/voicelistener status` - Show current config
+- `/simplevoicemechanics reload` - Reload config
+- `/simplevoicemechanics toggle <hostile|neutral|peaceful|warden|sculk>` - Toggle category
+- `/simplevoicemechanics status` - Show current config
 
-**Aliases:** `/vl`, `/voicemechanics`
+**Aliases:** `/svm`, `/voicemechanics`, `/voicelistener`, `/vl`
 
 ## Permissions
 
-- `voicelistener.admin` (default: op)
+- `simplevoicemechanics.admin` (default: op)
+- `simplevoicemechanics.bypass` (default: false)
+
+Legacy aliases `voicelistener.admin` and `voicelistener.bypass` are still accepted for existing servers.
 
 ## Preset Examples
 
@@ -201,6 +234,16 @@ mob-hearing:
 - Mobs: Piglins (18 block alert)
 - Result: 1 Piglin hears you → alerts 5 nearby Piglins → coordinated group attack
 
+**Rainy Night:**
+- Rain reduces voice range and makes detection harder
+- Sneaking lowers voice impact further
+- Wool or carpet between speaker and listener can prevent sculk-style detection
+
+**Hostile Investigation:**
+- First normal voice detection sends hostile mobs to the last heard position
+- Repeated, close, or very loud voice escalates to direct targeting
+- Group alerts happen after targeting by default
+
 ## Debug Options
 
 ```yaml
@@ -219,11 +262,12 @@ debug:
 
 **Detection Flow:**
 1. Audio packet received → Decode Opus → Calculate dB
-2. **NEW: Apply environmental modifiers (biome + time)**
+2. Apply acoustic modifiers (biome, time, weather, sneaking)
 3. Check category threshold → Calculate effective range
 4. Probability-based detection → Natural behavior check
-5. Execute action (Attack/Look/Flee/Follow)
-6. **NEW: If hostile detected, alert nearby allies**
+5. Apply cheap obstruction muffling for viable listeners
+6. Execute action (Investigate/Attack/Look/Flee/Follow)
+7. If hostile targeting escalates, alert nearby allies
 
 **Formulas:**
 ```
@@ -311,7 +355,7 @@ Available service hooks:
 - `registerMobReactionHook` can cancel specific mob reactions such as hostile targeting, invisible-player investigation, group alerts, fleeing, following, or Warden anger.
 - `registerSculkActivationHook` can cancel individual sculk sensor activations.
 
-Players with `voicelistener.bypass` do not trigger mob or sculk voice mechanics.
+Players with `simplevoicemechanics.bypass` do not trigger mob or sculk voice mechanics. The legacy `voicelistener.bypass` permission still works.
 
 ## Building
 

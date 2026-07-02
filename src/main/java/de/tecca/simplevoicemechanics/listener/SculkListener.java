@@ -6,11 +6,13 @@ import de.tecca.simplevoicemechanics.event.VoiceDetectedEvent;
 import de.tecca.simplevoicemechanics.manager.ConfigManager;
 import de.tecca.simplevoicemechanics.service.DetectionResult;
 import de.tecca.simplevoicemechanics.service.DetectionService;
-import de.tecca.simplevoicemechanics.service.SculkVibrationMath;
+import de.tecca.simplevoicemechanics.service.VoiceAcoustics;
 import de.tecca.simplevoicemechanics.util.RangeCalculator;
 import de.tecca.simplevoicemechanics.util.RandomProvider;
 import org.bukkit.*;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockState;
+import org.bukkit.block.SculkSensor;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -24,13 +26,16 @@ import java.util.Map;
  * <p>Triggers Sculk Sensors (regular and calibrated) when players speak nearby.
  * Uses range-based detection with configurable min/max range and falloff curve.
  *
- * <p>Requires Minecraft 1.19+ for GameEvent API support.
- * If GameEvent API is not available, this listener will be disabled.
+ * <p>Requires Minecraft 1.19+ vibration particle support.
+ * If the matching API is not available, this listener will be disabled.
  *
  * @author Tecca
  * @version 1.2.0
  */
 public class SculkListener implements Listener {
+
+    private static final double VANILLA_SCULK_SENSOR_RANGE = 8.0;
+    private static final double VANILLA_CALIBRATED_SCULK_SENSOR_RANGE = 16.0;
 
     private final SimpleVoiceMechanics plugin;
     private final boolean gameEventSupported;
@@ -43,7 +48,7 @@ public class SculkListener implements Listener {
         this.gameEventSupported = checkGameEventSupport();
 
         if (!gameEventSupported) {
-            plugin.getLogger().warning("GameEvent API not available - Sculk Sensor detection disabled");
+            plugin.getLogger().warning("Required sculk GameEvent API not available - Sculk Sensor detection disabled");
             plugin.getLogger().warning("Sculk Sensors require Minecraft 1.19+");
         }
 
@@ -88,7 +93,7 @@ public class SculkListener implements Listener {
             return;
         }
 
-        double decibels = event.getDecibels();
+        double decibels = VoiceAcoustics.applyGlobalModifiers(player, event.getDecibels(), plugin.getConfigManager());
 
         Location loc = event.getLocation();
         logSculkEvent(String.format(
@@ -114,7 +119,7 @@ public class SculkListener implements Listener {
      */
     private void processSculkSensors(Player player, Location loc, double decibels) {
         ConfigManager config = plugin.getConfigManager();
-        double maxRange = config.getSculkMaxRange();
+        double maxRange = applyRangeMultiplier(player, getMaxSculkScanBaseRange());
         double volumeThresholdDb = config.getSculkVolumeThresholdDb();
 
         // Calculate effective range based on volume
@@ -150,12 +155,17 @@ public class SculkListener implements Listener {
         int baseZ = playerLoc.getBlockZ();
         int minYOffset = Math.max(-searchRadius, world.getMinHeight() - baseY);
         int maxYOffset = Math.min(searchRadius, world.getMaxHeight() - 1 - baseY);
+        int radiusSquared = searchRadius * searchRadius;
         int sensorsFound = 0;
 
         // Iterate through all blocks in range
         for (int x = -searchRadius; x <= searchRadius; x++) {
             for (int y = minYOffset; y <= maxYOffset; y++) {
                 for (int z = -searchRadius; z <= searchRadius; z++) {
+                    if (x * x + y * y + z * z > radiusSquared) {
+                        continue;
+                    }
+
                     Block block = world.getBlockAt(baseX + x, baseY + y, baseZ + z);
 
                     if (isSculkSensor(block)) {
@@ -193,12 +203,12 @@ public class SculkListener implements Listener {
         }
 
         double distance = sensorLoc.distance(voiceLoc);
-        double maxRange = config.getSculkMaxRange();
-        double minRange = config.getSculkMinRange();
+        double maxRange = applyRangeMultiplier(player, getSensorBaseRange(block));
+        double minRange = Math.min(applyRangeMultiplier(player, config.getSculkMinRange()), maxRange);
         double falloffCurve = config.getSculkFalloffCurve();
         double volumeThresholdDb = config.getSculkVolumeThresholdDb();
-        DetectionResult detection = DetectionService.calculate(
-                distance, minRange, maxRange, falloffCurve, decibels, volumeThresholdDb
+        DetectionResult detection = calculateDetection(
+                voiceLoc, sensorLoc, distance, minRange, maxRange, falloffCurve, decibels, volumeThresholdDb
         );
 
         if (!detection.isThresholdPassed()) {
@@ -222,7 +232,7 @@ public class SculkListener implements Listener {
         }
 
         VoiceSculkActivationContext context = new VoiceSculkActivationContext(
-                player, block, distance, detection.getChance(), decibels
+                player, block, distance, detection.getChance(), detection.getDecibels()
         );
         plugin.getApi().callSculkActivationHooks(context);
         if (context.isCancelled()) {
@@ -230,7 +240,7 @@ public class SculkListener implements Listener {
             return;
         }
 
-        if (context.getEffectiveDecibels() != decibels) {
+        if (context.getEffectiveDecibels() != detection.getDecibels()) {
             DetectionResult adjustedDetection = DetectionService.calculate(
                     distance, minRange, maxRange, falloffCurve,
                     context.getEffectiveDecibels(), volumeThresholdDb
@@ -247,7 +257,7 @@ public class SculkListener implements Listener {
         }
 
         // Trigger the Sculk Sensor
-        triggerSculkSensor(block, player, voiceLoc, detection.getDistance());
+        triggerSculkSensor(player, voiceLoc);
 
         // Record trigger time
         lastTriggerTime.put(sensorLoc, System.currentTimeMillis());
@@ -255,12 +265,54 @@ public class SculkListener implements Listener {
         // Debug logging
         if (config.isSculkLoggingEnabled()) {
             plugin.getLogger().info(String.format(
-                    "Sculk %s activated by voice event%s | %s",
+                    "Sculk %s activated by voice event | %s",
                     block.getType(),
-                    config.isSculkVibrationParticleEnabled() ? " with vibration particle" : "",
                     detection.getDebugInfo()
             ));
         }
+    }
+
+    private double getMaxSculkScanBaseRange() {
+        return Math.max(0.0, VANILLA_CALIBRATED_SCULK_SENSOR_RANGE
+                + plugin.getConfigManager().getSculkRangeOffset());
+    }
+
+    private double getSensorBaseRange(Block block) {
+        double vanillaRange = getVanillaSensorRange(block);
+        return Math.max(0.0, vanillaRange + plugin.getConfigManager().getSculkRangeOffset());
+    }
+
+    private double getVanillaSensorRange(Block block) {
+        BlockState state = block.getState();
+        if (state instanceof SculkSensor) {
+            return ((SculkSensor) state).getListenerRange();
+        }
+
+        if (block.getType().name().equals("CALIBRATED_SCULK_SENSOR")) {
+            return VANILLA_CALIBRATED_SCULK_SENSOR_RANGE;
+        }
+        return VANILLA_SCULK_SENSOR_RANGE;
+    }
+
+    private double applyRangeMultiplier(Player player, double baseRange) {
+        return VoiceAcoustics.applyRangeMultiplier(player, baseRange, plugin.getConfigManager());
+    }
+
+    private DetectionResult calculateDetection(Location voiceLoc, Location sensorLoc,
+                                               double distance, double minRange, double maxRange,
+                                               double falloffCurve, double decibels,
+                                               double volumeThresholdDb) {
+        return VoiceAcoustics.calculateDetection(
+                plugin.getConfigManager(),
+                voiceLoc,
+                sensorLoc,
+                distance,
+                minRange,
+                maxRange,
+                falloffCurve,
+                decibels,
+                volumeThresholdDb
+        );
     }
 
     /**
@@ -278,40 +330,15 @@ public class SculkListener implements Listener {
     }
 
     /**
-     * Triggers a Sculk Sensor using Paper's GameEvent API.
-     * Only called when gameEventSupported is true.
+     * Sends a vanilla vibration-worthy game event from the speaker.
      */
-    private void triggerSculkSensor(Block block, Player player, Location voiceLoc, double distance) {
+    private void triggerSculkSensor(Player player, Location voiceLoc) {
         World world = voiceLoc.getWorld();
         if (world == null) {
             return;
         }
 
-        // Send the vibration-worthy event from the speaker position so vanilla sculk can hear it.
         world.sendGameEvent(player, GameEvent.STEP, voiceLoc.toVector());
-        spawnVibrationParticle(world, voiceLoc, block, distance);
-    }
-
-    /**
-     * Spawns the visible vibration travelling from the speaker to the sensor.
-     */
-    private void spawnVibrationParticle(World world, Location origin, Block sensorBlock, double distance) {
-        ConfigManager config = plugin.getConfigManager();
-        if (!config.isSculkVibrationParticleEnabled()) {
-            return;
-        }
-
-        int arrivalTicks = SculkVibrationMath.calculateArrivalTicks(
-                distance,
-                config.getSculkVibrationMinArrivalTicks(),
-                config.getSculkVibrationMaxArrivalTicks()
-        );
-        Vibration vibration = new Vibration(
-                origin,
-                new Vibration.Destination.BlockDestination(sensorBlock),
-                arrivalTicks
-        );
-        world.spawnParticle(Particle.VIBRATION, origin, 1, vibration);
     }
 
     /**

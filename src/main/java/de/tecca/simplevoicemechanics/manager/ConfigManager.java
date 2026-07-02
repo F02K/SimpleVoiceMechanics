@@ -85,6 +85,7 @@ public class ConfigManager {
     private int fleeDuration;
     // Follow behavior
     private boolean followWhenSneakingEnabled;
+    private boolean requireTemptItem;
     private boolean requireEyeContact;
     private double eyeContactRange;
     private int eyeContactMemory;
@@ -100,10 +101,10 @@ public class ConfigManager {
 
     // Sculk sensors
     private boolean sculkEnabled;
-    private Double sculkMaxRange;
     private Double sculkMinRange;
     private Double sculkFalloffCurve;
     private double sculkVolumeThresholdDb;
+    private double sculkRangeOffset;
     private long sculkCooldown;
     private boolean sculkVibrationParticle;
     private int sculkVibrationMinArrivalTicks;
@@ -113,10 +114,29 @@ public class ConfigManager {
     private boolean environmentalModifiersEnabled;
     private boolean biomeModifiersEnabled;
     private boolean timeModifiersEnabled;
+    private boolean weatherModifiersEnabled;
+    private double rainRangeMultiplier;
+    private double rainThresholdAdjustmentDb;
+    private double thunderRangeMultiplier;
+    private double thunderThresholdAdjustmentDb;
+
+    // Acoustic modifiers
+    private boolean sneakingReductionEnabled;
+    private double sneakingDecibelReduction;
+    private boolean obstructionMufflingEnabled;
+    private double obstructionMaxDbReduction;
+    private double obstructionWoolDbReduction;
+    private double obstructionSolidBlockDbReduction;
 
     // Mob group alerts
     private boolean mobGroupAlertEnabled;
     private int maxMobAlerts;
+    private boolean groupAlertOnlyAfterTargeting;
+
+    // Hostile investigation
+    private boolean hostileInvestigationEnabled;
+    private int hostileInvestigationMemorySeconds;
+    private int hostileInvestigationDetectionsToTarget;
 
     // Sculk performance
     private int sculkMaxScanRadius;
@@ -158,6 +178,16 @@ public class ConfigManager {
         defaultMinRange = readNonNegativeDouble(PATH_DETECTION + ".min-range", 2.0);
         defaultMinRange = Math.min(defaultMinRange, defaultMaxRange);
         defaultFalloffCurve = readClampedDouble(PATH_DETECTION + ".falloff-curve", 1.0, 0.0, 2.0);
+
+        String sneakingPath = PATH_DETECTION + ".sneaking-reduction";
+        sneakingReductionEnabled = config.getBoolean(sneakingPath + ".enabled", true);
+        sneakingDecibelReduction = readNonNegativeDouble(sneakingPath + ".decibel-reduction", 6.0);
+
+        String obstructionPath = PATH_DETECTION + ".obstruction-muffling";
+        obstructionMufflingEnabled = config.getBoolean(obstructionPath + ".enabled", true);
+        obstructionMaxDbReduction = readNonNegativeDouble(obstructionPath + ".max-db-reduction", 18.0);
+        obstructionWoolDbReduction = readNonNegativeDouble(obstructionPath + ".wool-db-reduction", 12.0);
+        obstructionSolidBlockDbReduction = readNonNegativeDouble(obstructionPath + ".solid-block-db-reduction", 4.0);
     }
 
     /**
@@ -198,9 +228,18 @@ public class ConfigManager {
         invisiblePlayerInvestigationTimeout = readNonNegativeInt(invisiblePath + ".investigation-timeout", 8);
         invisiblePlayerAttackIfStillThere = config.getBoolean(invisiblePath + ".attack-if-still-there", true);
 
+        String investigationPath = path + ".investigation";
+        hostileInvestigationEnabled = config.getBoolean(investigationPath + ".enabled", true);
+        hostileInvestigationMemorySeconds = readNonNegativeInt(investigationPath + ".memory-seconds", 10);
+        hostileInvestigationDetectionsToTarget = Math.max(
+                1,
+                readNonNegativeInt(investigationPath + ".detections-to-target", 2)
+        );
+
         String groupAlertPath = path + ".group-alert";
         mobGroupAlertEnabled = config.getBoolean(groupAlertPath + ".enabled", true);
         maxMobAlerts = readNonNegativeInt(groupAlertPath + ".max-alerts", 5);
+        groupAlertOnlyAfterTargeting = config.getBoolean(groupAlertPath + ".only-after-targeting", true);
     }
 
     /**
@@ -248,6 +287,7 @@ public class ConfigManager {
         // Follow when sneaking (all in seconds from config)
         String followPath = path + ".follow-when-sneaking";
         followWhenSneakingEnabled = config.getBoolean(followPath + ".enabled", true);
+        requireTemptItem = config.getBoolean(followPath + ".require-tempt-item", true);
         requireEyeContact = config.getBoolean(followPath + ".require-eye-contact", true);
         eyeContactRange = readNonNegativeDouble(followPath + ".eye-contact-range", 4.0);
         eyeContactMemory = readNonNegativeInt(followPath + ".eye-contact-memory", 5);  // seconds
@@ -274,7 +314,7 @@ public class ConfigManager {
     private void loadSculkSettings() {
         sculkEnabled = config.getBoolean(PATH_SCULK + ".enabled", true);
         sculkVolumeThresholdDb = readClampedDouble(PATH_SCULK + ".volume-threshold-db", -20.0, -127.0, 0.0);
-        sculkMaxRange = getOptionalNonNegativeDouble(PATH_SCULK + ".max-range");
+        sculkRangeOffset = config.getDouble(PATH_SCULK + ".range-offset", 0.0);
         sculkMinRange = getOptionalNonNegativeDouble(PATH_SCULK + ".min-range");
         sculkFalloffCurve = getOptionalClampedDouble(PATH_SCULK + ".falloff-curve", 0.0, 2.0);
         sculkCooldown = readNonNegativeLong(PATH_SCULK + ".cooldown", 1000);
@@ -296,6 +336,13 @@ public class ConfigManager {
         environmentalModifiersEnabled = config.getBoolean(PATH_ENVIRONMENTAL + ".enabled", true);
         biomeModifiersEnabled = config.getBoolean(PATH_ENVIRONMENTAL + ".biome-modifiers.enabled", true);
         timeModifiersEnabled = config.getBoolean(PATH_ENVIRONMENTAL + ".time-modifiers.enabled", true);
+
+        String weatherPath = PATH_ENVIRONMENTAL + ".weather-modifiers";
+        weatherModifiersEnabled = config.getBoolean(weatherPath + ".enabled", true);
+        rainRangeMultiplier = readNonNegativeDouble(weatherPath + ".rain.range-multiplier", 0.85);
+        rainThresholdAdjustmentDb = config.getDouble(weatherPath + ".rain.threshold-adjustment-db", 3.0);
+        thunderRangeMultiplier = readNonNegativeDouble(weatherPath + ".thunder.range-multiplier", 0.70);
+        thunderThresholdAdjustmentDb = config.getDouble(weatherPath + ".thunder.threshold-adjustment-db", 6.0);
     }
 
     /**
@@ -383,6 +430,12 @@ public class ConfigManager {
     public double getDefaultMaxRange() { return defaultMaxRange; }
     public double getDefaultMinRange() { return defaultMinRange; }
     public double getDefaultFalloffCurve() { return defaultFalloffCurve; }
+    public boolean isSneakingReductionEnabled() { return sneakingReductionEnabled; }
+    public double getSneakingDecibelReduction() { return sneakingDecibelReduction; }
+    public boolean isObstructionMufflingEnabled() { return obstructionMufflingEnabled; }
+    public double getObstructionMaxDbReduction() { return obstructionMaxDbReduction; }
+    public double getObstructionWoolDbReduction() { return obstructionWoolDbReduction; }
+    public double getObstructionSolidBlockDbReduction() { return obstructionSolidBlockDbReduction; }
 
     // Mob hearing
     public boolean isMobHearingEnabled() { return mobHearingEnabled; }
@@ -398,6 +451,9 @@ public class ConfigManager {
     public double getInvisiblePlayerMovementTolerance() { return invisiblePlayerMovementTolerance; }
     public int getInvisiblePlayerInvestigationTimeout() { return invisiblePlayerInvestigationTimeout; }
     public boolean shouldInvisiblePlayerAttackIfStillThere() { return invisiblePlayerAttackIfStillThere; }
+    public boolean isHostileInvestigationEnabled() { return hostileInvestigationEnabled; }
+    public int getHostileInvestigationMemorySeconds() { return hostileInvestigationMemorySeconds; }
+    public int getHostileInvestigationDetectionsToTarget() { return hostileInvestigationDetectionsToTarget; }
 
     // Neutral mobs
     public boolean isNeutralMobsEnabled() { return neutralMobsEnabled; }
@@ -429,6 +485,7 @@ public class ConfigManager {
     public int getFleeDurationTicks() { return fleeDuration * 20; }  // seconds to ticks
     // Follow behavior
     public boolean isFollowWhenSneakingEnabled() { return followWhenSneakingEnabled; }
+    public boolean requiresTemptItem() { return requireTemptItem; }
     public boolean requiresEyeContact() { return requireEyeContact; }
     public double getEyeContactRange() { return eyeContactRange; }
     public long getEyeContactMemoryMs() { return eyeContactMemory * 1000L; }  // seconds to ms
@@ -444,8 +501,8 @@ public class ConfigManager {
 
     // Sculk
     public boolean isSculkEnabled() { return sculkEnabled; }
-    public double getSculkMaxRange() { return sculkMaxRange != null ? sculkMaxRange : defaultMaxRange; }
-    public double getSculkMinRange() { return Math.min(sculkMinRange != null ? sculkMinRange : defaultMinRange, getSculkMaxRange()); }
+    public double getSculkRangeOffset() { return sculkRangeOffset; }
+    public double getSculkMinRange() { return sculkMinRange != null ? sculkMinRange : defaultMinRange; }
     public double getSculkFalloffCurve() { return sculkFalloffCurve != null ? sculkFalloffCurve : defaultFalloffCurve; }
     public double getSculkVolumeThresholdDb() { return sculkVolumeThresholdDb; }
     public long getSculkCooldown() { return sculkCooldown; }
@@ -456,7 +513,11 @@ public class ConfigManager {
 
     // Environmental modifiers
     public boolean isEnvironmentalModifiersEnabled() { return environmentalModifiersEnabled; }
-    public boolean isWeatherModifiersEnabled() { return false; }
+    public boolean isWeatherModifiersEnabled() { return weatherModifiersEnabled && environmentalModifiersEnabled; }
+    public double getRainRangeMultiplier() { return rainRangeMultiplier; }
+    public double getRainThresholdAdjustmentDb() { return rainThresholdAdjustmentDb; }
+    public double getThunderRangeMultiplier() { return thunderRangeMultiplier; }
+    public double getThunderThresholdAdjustmentDb() { return thunderThresholdAdjustmentDb; }
 
     // Legacy compatibility (deprecated)
     @Deprecated
@@ -515,6 +576,10 @@ public class ConfigManager {
 
     public int getMaxMobAlerts() {
         return maxMobAlerts;
+    }
+
+    public boolean shouldGroupAlertOnlyAfterTargeting() {
+        return groupAlertOnlyAfterTargeting;
     }
 
     public double getGroupAlertRange(String mobType) {

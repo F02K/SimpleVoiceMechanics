@@ -9,25 +9,46 @@ website: https://github.com/T3CC4/SimpleVoiceMechanics
 
 # Commands
 commands:
-  voicelistener:
+  simplevoicemechanics:
     description: Main command for SimpleVoiceMechanics administration
     usage: /<command> [reload|toggle|status]
-    aliases: [vl, voicemechanics]
-    permission: voicelistener.admin
+    aliases: [svm, voicemechanics, voicelistener, vl]
+    permission: simplevoicemechanics.admin
 
 # Permissions
 permissions:
-  voicelistener.*:
+  simplevoicemechanics.*:
     description: Grants all SimpleVoiceMechanics permissions
+    default: op
+    children:
+      simplevoicemechanics.admin: true
+      simplevoicemechanics.bypass: true
+
+  simplevoicemechanics.admin:
+    description: Allows use of all admin commands
+    default: op
+
+  simplevoicemechanics.bypass:
+    description: Prevents the player's voice from triggering SimpleVoiceMechanics reactions
+    default: false
+
+  voicelistener.*:
+    description: Legacy alias for SimpleVoiceMechanics permissions
     default: op
     children:
       voicelistener.admin: true
       voicelistener.bypass: true
+      simplevoicemechanics.admin: true
+      simplevoicemechanics.bypass: true
 
   voicelistener.admin:
-    description: Allows use of all admin commands
+    description: Legacy alias for simplevoicemechanics.admin
     default: op
+    children:
+      simplevoicemechanics.admin: true
 
   voicelistener.bypass:
-    description: Prevents the player's voice from triggering SimpleVoiceMechanics reactions
+    description: Legacy alias for simplevoicemechanics.bypass
     default: false
+    children:
+      simplevoicemechanics.bypass: true

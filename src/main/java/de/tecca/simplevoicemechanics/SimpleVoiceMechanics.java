@@ -130,13 +130,13 @@ public final class SimpleVoiceMechanics extends JavaPlugin {
      * Registers all commands for the plugin.
      */
     private void registerCommands() {
-        PluginCommand command = getCommand("voicelistener");
+        PluginCommand command = getCommand("simplevoicemechanics");
         if (command == null) {
-            getLogger().severe("Command voicelistener is missing from plugin.yml");
+            getLogger().severe("Command simplevoicemechanics is missing from plugin.yml");
             return;
         }
         command.setExecutor(new VoiceCommand(this));
-        getLogger().info("Commands registered (/voicelistener)");
+        getLogger().info("Commands registered (/simplevoicemechanics)");
     }
 
     /**

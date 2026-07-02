@@ -6,7 +6,7 @@
 
     <groupId>de.tecca</groupId>
     <artifactId>simplevoicemechanics</artifactId>
-    <version>1.4.0</version>
+    <version>1.5.0</version>
     <packaging>jar</packaging>
 
     <name>SimpleVoiceMechanics</name>

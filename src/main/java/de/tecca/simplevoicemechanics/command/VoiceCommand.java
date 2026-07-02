@@ -2,6 +2,7 @@ package de.tecca.simplevoicemechanics.command;
 
 import de.tecca.simplevoicemechanics.SimpleVoiceMechanics;
 import de.tecca.simplevoicemechanics.manager.ConfigManager;
+import de.tecca.simplevoicemechanics.util.PluginPermissions;
 import org.bukkit.ChatColor;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -22,6 +23,8 @@ import org.bukkit.command.CommandSender;
  */
 public class VoiceCommand implements CommandExecutor {
 
+    private static final String PRIMARY_COMMAND = "/simplevoicemechanics";
+
     private final SimpleVoiceMechanics plugin;
 
     public VoiceCommand(SimpleVoiceMechanics plugin) {
@@ -30,7 +33,7 @@ public class VoiceCommand implements CommandExecutor {
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (!sender.hasPermission("voicelistener.admin")) {
+        if (!PluginPermissions.hasAdmin(sender)) {
             sender.sendMessage(ChatColor.RED + "No permission!");
             return true;
         }
@@ -47,7 +50,8 @@ public class VoiceCommand implements CommandExecutor {
 
             case "toggle":
                 if (args.length < 2) {
-                    sender.sendMessage(ChatColor.RED + "Usage: /voicelistener toggle <hostile|neutral|peaceful|warden|sculk>");
+                    sender.sendMessage(ChatColor.RED + "Usage: " + PRIMARY_COMMAND
+                            + " toggle <hostile|neutral|peaceful|warden|sculk>");
                     return true;
                 }
                 handleToggle(sender, args[1]);
@@ -70,13 +74,14 @@ public class VoiceCommand implements CommandExecutor {
      */
     private void sendHelp(CommandSender sender) {
         sender.sendMessage(ChatColor.GOLD + "=== SimpleVoiceMechanics ===");
-        sender.sendMessage(ChatColor.YELLOW + "/voicelistener reload " +
+        sender.sendMessage(ChatColor.YELLOW + PRIMARY_COMMAND + " reload " +
                 ChatColor.GRAY + "- Reload configuration");
-        sender.sendMessage(ChatColor.YELLOW + "/voicelistener toggle <category> " +
+        sender.sendMessage(ChatColor.YELLOW + PRIMARY_COMMAND + " toggle <category> " +
                 ChatColor.GRAY + "- Toggle mob category or sculk");
-        sender.sendMessage(ChatColor.YELLOW + "/voicelistener status " +
+        sender.sendMessage(ChatColor.YELLOW + PRIMARY_COMMAND + " status " +
                 ChatColor.GRAY + "- Display current status");
         sender.sendMessage(ChatColor.GRAY + "Categories: hostile, neutral, peaceful, warden, sculk");
+        sender.sendMessage(ChatColor.GRAY + "Aliases: /svm, /voicemechanics, /voicelistener, /vl");
     }
 
     /**
@@ -154,14 +159,12 @@ public class VoiceCommand implements CommandExecutor {
         sender.sendMessage(ChatColor.GOLD + "=== SimpleVoiceMechanics Status ===");
         sender.sendMessage("");
 
-        // Global settings
         sender.sendMessage(ChatColor.YELLOW + "Global Detection:");
         sender.sendMessage(formatRange("  Range",
                 config.getDefaultMinRange(), config.getDefaultMaxRange()));
         sender.sendMessage(formatValue("  Falloff Curve", config.getDefaultFalloffCurve()));
         sender.sendMessage("");
 
-        // Mob categories
         sender.sendMessage(ChatColor.YELLOW + "Mob Hearing: " +
                 formatEnabled(config.isMobHearingEnabled()));
 
@@ -185,7 +188,7 @@ public class VoiceCommand implements CommandExecutor {
                     config.getPeacefulFalloffCurve()));
 
             if (config.isPeacefulMobsEnabled() && config.isFollowWhenSneakingEnabled()) {
-                sender.sendMessage(ChatColor.GRAY + "    → Follow when sneaking: " +
+                sender.sendMessage(ChatColor.GRAY + "    Follow when sneaking: " +
                         ChatColor.WHITE + config.getFollowDuration() + "s (" +
                         config.getFollowMaxDistance() + " blocks)");
             }
@@ -199,12 +202,14 @@ public class VoiceCommand implements CommandExecutor {
 
         sender.sendMessage("");
 
-        // Sculk sensors
-        sender.sendMessage(formatCategory("Sculk Sensors",
-                config.isSculkEnabled(),
+        sender.sendMessage((config.isSculkEnabled() ? ChatColor.GREEN + "[ON]" : ChatColor.RED + "[OFF]") +
+                " " + ChatColor.YELLOW + "Sculk Sensors" + ChatColor.GRAY + ": " +
+                ChatColor.WHITE + (config.isSculkEnabled()
+                ? String.format("vanilla range %+.1f blocks (min: %.1f, curve: %.1f)",
+                config.getSculkRangeOffset(),
                 config.getSculkMinRange(),
-                config.getSculkMaxRange(),
-                config.getSculkFalloffCurve()));
+                config.getSculkFalloffCurve())
+                : "disabled"));
 
         if (config.isSculkEnabled()) {
             sender.sendMessage(ChatColor.GRAY + "  Cooldown: " +
@@ -267,7 +272,7 @@ public class VoiceCommand implements CommandExecutor {
      * Formats a status line with enabled/disabled indicator.
      */
     private String formatEnabled(boolean enabled) {
-        return enabled ? ChatColor.GREEN + "✓ Enabled" : ChatColor.RED + "✗ Disabled";
+        return enabled ? ChatColor.GREEN + "[ON] Enabled" : ChatColor.RED + "[OFF] Disabled";
     }
 
     /**
@@ -275,7 +280,7 @@ public class VoiceCommand implements CommandExecutor {
      */
     private String formatCategory(String name, boolean enabled, double minRange,
                                   double maxRange, double falloff) {
-        String status = enabled ? ChatColor.GREEN + "✓" : ChatColor.RED + "✗";
+        String status = enabled ? ChatColor.GREEN + "[ON]" : ChatColor.RED + "[OFF]";
         String range = String.format("%.1f-%.1f blocks (curve: %.1f)", minRange, maxRange, falloff);
         return status + " " + ChatColor.YELLOW + name + ChatColor.GRAY + ": " +
                 ChatColor.WHITE + (enabled ? range : "disabled");
